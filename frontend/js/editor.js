@@ -273,11 +273,11 @@ function renderTabs(tabBarContainer, onTabClick, onTabClose) {
     });
 }
 
-export async function clearEditor() {
+export function clearEditor() {
     if (editor) {
         // Use managed model instead of creating directly
-        const placeholderModel = await monacoModelManager.getModel(
-            '__placeholder__',
+        const placeholderModel = monacoModelManager.getModel(
+            '__placeholder__', 
             '// Select a file to view its content',
             'plaintext'
         );
@@ -326,13 +326,6 @@ export function initializeEditor(editorContainer, tabBarContainer, appState) {
                 language: 'html',
                 theme: 'cfmlTheme',
                 readOnly: true,
-            });
-
-            // Ensure JavaScript/TypeScript diagnostics are enabled by default
-            monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-                noSemanticValidation: false,
-                noSyntaxValidation: false,
-                noSuggestionDiagnostics: false
             });
             
             // Set the createModel function in the manager now that Monaco is loaded
@@ -564,7 +557,7 @@ export async function openFile(fileHandle, filePath, tabBarContainer, focusEdito
                 truncated: result.truncated
             };
             
-            const model = await monacoModelManager.getModel(
+            const model = monacoModelManager.getModel(
                 filePath,
                 result.content,
                 language,
@@ -862,7 +855,7 @@ export async function restoreEditorState(state, rootHandle, tabBarContainer) {
         try {
             const fileHandle = await getFileHandleFromPath(rootHandle, fileData.path, { create: true });
             // Use managed model creation
-            const model = await monacoModelManager.getModel(
+            const model = monacoModelManager.getModel(
                 fileData.path,
                 fileData.content,
                 getLanguageFromExtension(fileData.path.split('.').pop())

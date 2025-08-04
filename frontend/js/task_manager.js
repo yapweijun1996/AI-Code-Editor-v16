@@ -419,22 +419,8 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                 }
             }
             
-            // 4. Final attempt: find the first '[' and last ']' and try to parse
             if (!jsonArray) {
-                const firstBracket = response.indexOf('[');
-                const lastBracket = response.lastIndexOf(']');
-                if (firstBracket !== -1 && lastBracket > firstBracket) {
-                    const potentialJson = response.substring(firstBracket, lastBracket + 1);
-                    try {
-                        jsonArray = JSON.parse(potentialJson);
-                    } catch (e) {
-                        console.warn('[TaskManager] Failed to parse aggressively extracted JSON:', e.message);
-                    }
-                }
-            }
-
-            if (!jsonArray) {
-                console.error('[TaskManager] AI response that caused parsing failure:', response);
+                console.error('[TaskManager] AI response:', response);
                 throw new Error('No valid JSON array found in AI response');
             }
             

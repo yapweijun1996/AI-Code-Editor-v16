@@ -994,7 +994,7 @@ async function _applyDiff({ filename, diff }, rootHandle) {
     
     for (const rawBlock of rawBlocks) {
         // Parse each block individually
-        const blockPattern = /^\s*\n:start_line:(\d+)\s*\n-------\s*\n([\s\S]*?)\n=======\s*\n([\s\S]*?)(?:\r?\n)?>>>>>>> REPLACE/;
+        const blockPattern = /^\s*\n:start_line:(\d+)\s*\n-------\s*\n([\s\S]*?)\n=======\s*\n([\s\S]*?)\n>>>>>>> REPLACE/;
         const match = rawBlock.match(blockPattern);
         
         if (match) {
@@ -1127,22 +1127,7 @@ async function _applyDiff({ filename, diff }, rootHandle) {
             });
             
             const actualContent = modifiedLines.slice(actualStartIndex, actualStartIndex + searchLines.length).join('\n');
-            
-            // Generate a simple diff view for better debugging
-            const expectedLines = searchContent.split(/\r?\n/);
-            const actualLines = actualContent.split(/\r?\n/);
-            let diffView = 'Diff view (Expected vs. Actual):\n';
-            const maxLines = Math.max(expectedLines.length, actualLines.length);
-            for (let i = 0; i < maxLines; i++) {
-                const expected = expectedLines[i] || '';
-                const actual = actualLines[i] || '';
-                if (expected !== actual) {
-                    diffView += ` L${startLine + i} - Expected: "${expected}"\n`;
-                    diffView += ` L${startLine + i} - Actual  : "${actual}"\n\n`;
-                }
-            }
-
-            throw new Error(`Search content does not match at line ${startLine}.\n\n${mismatchDetails}\n${diffView}`);
+            throw new Error(`Search content does not match at line ${startLine}.\n\n${mismatchDetails}\nExpected content:\n${searchContent}\n\nActual content:\n${actualContent}`);
         }
         
         // Update the search start index to the found position
@@ -1263,11 +1248,7 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
     const originalContent = await file.text();
     UndoManager.push(filename, originalContent);
     
-    // Handle empty files correctly
     let lines = originalContent.split(/\r?\n/);
-    if (originalContent === '') {
-        lines = [];
-    }
     const originalLineCount = lines.length;
     
     // Enhanced validation with better error messages and graceful clamping
@@ -1293,14 +1274,8 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
             }
         } else if (edit.type === 'insert_lines') {
             const { line_number } = edit;
-            if (typeof line_number !== 'number' || line_number < 0) {
-                throw new Error(`Invalid line number for insert: ${line_number}. Must be a non-negative number.`);
-            }
-            // Allow inserting at the end of the file (line_number === originalLineCount)
-            // Gracefully clamp if the line number is out of bounds for appending
-            if (line_number > originalLineCount) {
-                console.warn(`Warning: insert line_number (${line_number}) exceeds file length (${originalLineCount}). Clamping to ${originalLineCount} for append operation.`);
-                edit.line_number = originalLineCount;
+            if (typeof line_number !== 'number' || line_number < 0 || line_number > originalLineCount) {
+                throw new Error(`Invalid line number for insert: ${line_number} (file has ${originalLineCount} lines)`);
             }
         } else if (!edit.type) {
             throw new Error(`Missing edit type: Each edit must have a 'type' property of either 'replace_lines' or 'insert_lines'`);
@@ -3951,11 +3926,14 @@ export function getToolDefinitions() {
             // REMOVED: run_terminal_command - Tool eliminated to maintain browser-first architecture
             { name: 'build_or_update_codebase_index', description: 'Scans the entire codebase to build a searchable index. Slow, run once per session.' },
             { name: 'query_codebase', description: 'Searches the pre-built codebase index.', parameters: { type: 'OBJECT', properties: { query: { type: 'STRING' } }, required: ['query'] } },
+            { name: 'get_file_history', description: "DISABLED: Git history feature has been disabled in this browser-based editor. Use your local git client for version control operations.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
+            // REMOVED: insert_content, create_and_apply_diff, replace_lines - simplified to use rewrite_file only
             { name: 'format_code', description: "Formats a file with Prettier. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
             { name: 'analyze_code', description: "Analyzes a JavaScript file's structure. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
             { name: 'edit_file', description: "The primary tool for all file modifications. CRITICAL: Before using this tool to fix an error, you MUST use 'read_file' to get the full, up-to-date content of the file. CRITICAL: If the content you are using was retrieved with line numbers, you MUST remove the line numbers and the ` | ` separator from every line before using it in the 'new_content' or 'content' parameter. The content must be the raw source code. Provide EITHER 'content' for a full rewrite OR an 'edits' array for targeted changes.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING', description: 'Complete file content for small files. CRITICAL: Do NOT wrap in markdown backticks.' }, edits: { type: 'ARRAY', items: { type: 'OBJECT', properties: { type: { type: 'STRING', enum: ['replace_lines', 'insert_lines'] }, start_line: { type: 'NUMBER', description: 'Start line for replace_lines' }, end_line: { type: 'NUMBER', description: 'End line for replace_lines' }, line_number: { type: 'NUMBER', description: 'Line position for insert_lines (0=start of file)' }, new_content: { type: 'STRING' } } }, description: 'Efficient targeted edits for large files. Use replace_lines to replace line ranges or insert_lines to add content.' } }, required: ['filename'] } },
             { name: 'append_to_file', description: "Fast append content to end of file without reading full content. Ideal for logs, incremental updates.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING', description: 'Content to append. Will add newline separator automatically.' } }, required: ['filename', 'content'] } },
             { name: 'get_file_info', description: "Get file metadata (size, last modified, type) without reading content. Use before editing large files.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
+            { name: 'rewrite_file', description: "DEPRECATED and REMOVED. Use 'edit_file' instead.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING' } }, required: ['filename', 'content'] } },
             { name: 'apply_diff', description: "🔧 RECOMMENDED: Apply precise, surgical changes to files using diff blocks. This is the safest and most reliable way to edit files. Use this instead of edit_file when you need to make targeted changes. CRITICAL: The diff parameter must contain properly formatted diff blocks with EXACT format:\n\n<<<<<<< SEARCH\n:start_line:10\n-------\nold code here\n=======\nnew code here\n>>>>>>> REPLACE\n\nMANDATORY REQUIREMENTS:\n1. Must include ':start_line:N' where N is the line number\n2. Must include '-------' separator line after start_line\n3. Must include '=======' separator between old and new content\n4. Each line must be exact, including whitespace and indentation\n5. Use read_file with include_line_numbers=true first to get accurate content", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING', description: 'Path to the file to modify' }, diff: { type: 'STRING', description: 'One or more diff blocks in the EXACT format: <<<<<<< SEARCH\\n:start_line:N\\n-------\\nold content\\n=======\\nnew content\\n>>>>>>> REPLACE. The -------  separator line is MANDATORY.' } }, required: ['filename', 'diff'] } },
             
             // --- Unified Task Management System ---

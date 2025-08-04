@@ -9,14 +9,10 @@ export class MonacoModelManager {
         this.hibernatedModels = new Map(); // filename -> { content, lastAccessed, language }
         this.memoryPressureCallbacks = new Set();
         this.createModelFn = null;
-        this.initializationPromise = new Promise(resolve => {
-            this.resolveInitialization = resolve;
-        });
     }
 
     setCreateModelFunction(fn) {
         this.createModelFn = fn;
-        this.resolveInitialization();
     }
 
     /**
@@ -25,9 +21,9 @@ export class MonacoModelManager {
      * @param {string} content - The file content
      * @param {string} language - The Monaco language identifier
      * @param {Object} options - Additional options (strategy, truncated, etc.)
-     * @returns {Promise<monaco.editor.ITextModel>}
+     * @returns {monaco.editor.ITextModel}
      */
-    async getModel(filename, content, language, options = {}) {
+    getModel(filename, content, language, options = {}) {
         // Check if model already exists
         if (this.models.has(filename)) {
             const modelInfo = this.models.get(filename);
@@ -56,7 +52,7 @@ export class MonacoModelManager {
         const strategy = options.strategy || (isLarge ? 'large' : 'standard');
 
         // Create new model with special handling for large files
-        const model = await this.createModelWithStrategy(content, language, strategy, options, filename);
+        const model = this.createModelWithStrategy(content, language, strategy, options, filename);
         
         // Store model info
         this.models.set(filename, {
@@ -81,10 +77,7 @@ export class MonacoModelManager {
     /**
      * Create a Monaco model with the appropriate strategy
      */
-    async createModelWithStrategy(content, language, strategy, options, filename) {
-        // Wait for Monaco to be fully initialized
-        await this.initializationPromise;
-
+    createModelWithStrategy(content, language, strategy, options, filename) {
         if (typeof monaco === 'undefined' || !monaco.editor) {
             throw new Error('Monaco editor is not available. Ensure it is loaded before creating models.');
         }
@@ -93,11 +86,12 @@ export class MonacoModelManager {
         let model;
 
         try {
-            // Use the provided createModel function which is now guaranteed to be set
-            if (typeof this.createModelFn !== 'function') {
+            // Use the provided createModel function if available, otherwise fallback to default
+            const createFn = this.createModelFn || monaco.editor.createModel;
+            if (typeof createFn !== 'function') {
                  throw new Error('monaco.editor.createModel is not a function. Monaco may not be fully initialized.');
             }
-            model = this.createModelFn(content, language, uri);
+            model = createFn(content, language, uri);
 
         } catch (error) {
             console.error(`Failed to create Monaco model for ${filename} (strategy: ${strategy}).`, error);
@@ -134,9 +128,23 @@ export class MonacoModelManager {
                 const uri = model.uri;
                 
                 // This is language-specific optimization
-                // No longer disabling diagnostics globally.
-                // This is now handled by default settings in editor.js
-                // and should not be changed on a per-file basis to avoid state bugs.
+                switch (language) {
+                    case 'javascript':
+                    case 'typescript':
+                        // Disable semantic validation for large JS/TS files
+                        monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+                            noSemanticValidation: true,
+                            noSuggestionDiagnostics: true
+                        });
+                        break;
+                    case 'json':
+                        // Disable JSON schema validation for large JSON files
+                        monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
+                            validate: false,
+                            allowComments: true
+                        });
+                        break;
+                }
             }
         } catch (error) {
             console.warn('Failed to optimize model for large file:', error);
