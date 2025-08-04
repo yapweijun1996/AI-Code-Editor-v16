@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Stage Research Test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.5;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background-color: #3367d6;
+        }
+        input[type="text"] {
+            padding: 8px;
+            width: 400px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .results {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            height: 400px;
+            overflow: auto;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4285f4;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: #4285f4;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 10px;
+            display: none;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>Multi-Stage Research Test</h1>
+    <p>This page tests the enhanced multi-stage research implementation that delivers more comprehensive results by using a three-stage approach:</p>
+    <ol>
+        <li><strong>Stage 1:</strong> Broad keyword extraction and parallel search waves</li>
+        <li><strong>Stage 2:</strong> Link aggregation and first-pass analysis to identify knowledge gaps</li>
+        <li><strong>Stage 3:</strong> Focused content reading and synthesis to fill knowledge gaps</li>
+    </ol>
+
+    <div class="form-group">
+        <label for="query">Research Query:</label>
+        <input type="text" id="query" value="What are the main architectural patterns in software engineering?">
+    </div>
+
+    <div class="form-group">
+        <button id="runTestBtn"><span class="spinner" id="spinner"></span>Run Research Test</button>
+        <button id="runComparisonBtn">Compare Implementations</button>
+    </div>
+
+    <div class="stats" id="statsContainer" style="display: none;">
+        <div class="stat-card">
+            <div class="stat-value" id="totalSources">0</div>
+            <div class="stat-label">Total Sources</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="uniqueDomains">0</div>
+            <div class="stat-label">Unique Domains</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="knowledgeGaps">0</div>
+            <div class="stat-label">Knowledge Gaps</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="searchQueries">0</div>
+            <div class="stat-label">Search Queries</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="stage1Sources">0</div>
+            <div class="stat-label">Stage 1 Sources</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="stage3Sources">0</div>
+            <div class="stat-label">Stage 3 Sources</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="duration">0</div>
+            <div class="stat-label">Duration (seconds)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="relevanceScore">0</div>
+            <div class="stat-label">Avg. Relevance Score</div>
+        </div>
+    </div>
+
+    <h2>Results:</h2>
+    <div class="results" id="resultsContainer">Results will appear here...</div>
+
+    <!-- Load local tokenizer fallback first -->
+    <script src="./js/vendor/gpt-tokenizer.js"></script>
+    
+    <script type="module">
+        import { testResearch, compareResearchImplementations } from './test_research.js';
+
+        const runTestBtn = document.getElementById('runTestBtn');
+        const runComparisonBtn = document.getElementById('runComparisonBtn');
+        const queryInput = document.getElementById('query');
+        const resultsContainer = document.getElementById('resultsContainer');
+        const statsContainer = document.getElementById('statsContainer');
+        const spinner = document.getElementById('spinner');
+
+        // Stats elements
+        const totalSources = document.getElementById('totalSources');
+        const uniqueDomains = document.getElementById('uniqueDomains');
+        const knowledgeGaps = document.getElementById('knowledgeGaps');
+        const searchQueries = document.getElementById('searchQueries');
+        const stage1Sources = document.getElementById('stage1Sources');
+        const stage3Sources = document.getElementById('stage3Sources');
+        const duration = document.getElementById('duration');
+        const relevanceScore = document.getElementById('relevanceScore');
+
+        // Custom console.log implementation to capture logs
+        const originalConsoleLog = console.log;
+        const originalConsoleError = console.error;
+        
+        console.log = function(...args) {
+            originalConsoleLog.apply(console, args);
+            
+            const message = args.map(arg => {
+                if (typeof arg === 'object') {
+                    try {
+                        return JSON.stringify(arg, null, 2);
+                    } catch (e) {
+                        return String(arg);
+                    }
+                } else {
+                    return String(arg);
+                }
+            }).join(' ');
+            
+            resultsContainer.textContent += message + '\n';
+            resultsContainer.scrollTop = resultsContainer.scrollHeight;
+        };
+
+        console.error = function(...args) {
+            originalConsoleError.apply(console, args);
+            
+            const message = args.map(arg => {
+                if (typeof arg === 'object') {
+                    try {
+                        return JSON.stringify(arg, null, 2);
+                    } catch (e) {
+                        return String(arg);
+                    }
+                } else {
+                    return String(arg);
+                }
+            }).join(' ');
+            
+            resultsContainer.textContent += '❌ ERROR: ' + message + '\n';
+            resultsContainer.scrollTop = resultsContainer.scrollHeight;
+        };
+
+        function updateStats(stats, testDuration) {
+            statsContainer.style.display = 'grid';
+            
+            totalSources.textContent = stats.totalSources || 0;
+            uniqueDomains.textContent = stats.uniqueDomains || 0;
+            knowledgeGaps.textContent = stats.knowledgeGaps || 0;
+            searchQueries.textContent = stats.searchQueries || 0;
+            stage1Sources.textContent = stats.stage1Sources || 0;
+            stage3Sources.textContent = stats.stage3Sources || 0;
+            duration.textContent = testDuration ? testDuration.toFixed(1) : 0;
+            relevanceScore.textContent = stats.avgRelevanceScore ? stats.avgRelevanceScore.toFixed(2) : 0;
+        }
+
+        runTestBtn.addEventListener('click', async () => {
+            const query = queryInput.value.trim();
+            if (!query) {
+                alert('Please enter a research query');
+                return;
+            }
+            
+            // Clear previous results
+            resultsContainer.textContent = '';
+            spinner.style.display = 'inline-block';
+            runTestBtn.disabled = true;
+            runComparisonBtn.disabled = true;
+            
+            try {
+                const result = await testResearch({
+                    query: query,
+                    verbose: true
+                });
+                
+                if (result.success) {
+                    updateStats(result.stats, result.duration);
+                }
+            } catch (error) {
+                console.error('Test failed:', error);
+            } finally {
+                spinner.style.display = 'none';
+                runTestBtn.disabled = false;
+                runComparisonBtn.disabled = false;
+            }
+        });
+
+        runComparisonBtn.addEventListener('click', async () => {
+            const query = queryInput.value.trim();
+            if (!query) {
+                alert('Please enter a research query');
+                return;
+            }
+            
+            // Clear previous results
+            resultsContainer.textContent = '';
+            spinner.style.display = 'inline-block';
+            runTestBtn.disabled = true;
+            runComparisonBtn.disabled = true;
+            
+            try {
+                const result = await compareResearchImplementations({
+                    query: query
+                });
+                
+                if (result.success) {
+                    updateStats(result.multiStageStats, result.duration);
+                }
+            } catch (error) {
+                console.error('Comparison failed:', error);
+            } finally {
+                spinner.style.display = 'none';
+                runTestBtn.disabled = false;
+                runComparisonBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Intelligent Code Editor</title>
+    <script>
+     (function() {
+       const theme = localStorage.getItem('theme') || 'dark';
+       document.documentElement.setAttribute('data-theme', theme);
+     })();
+    </script>
+    <link rel="stylesheet" href="style.css" />
+    <!-- jsTree CSS -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.3.12/themes/default/style.min.css"
+    />
+    <!-- Font Awesome for icons -->
+    <link 
+      rel="stylesheet" 
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    />
+  </head>
+  <body>
+    <div id="error-container"></div>
+    <div id="toast-container"></div>
+    <div class="overlay"></div>
+    <div class="container" id="split-container">
+      <div id="file-tree-container" class="sidebar">
+        <div class="sidebar-tabs">
+            <div class="sidebar-tab active" id="files-tab">Files</div>
+            <div class="sidebar-tab" id="search-tab">Search</div>
+            <div class="sidebar-tab" id="tasks-tab">Tasks</div>
+        </div>
+        <div class="sidebar-content" id="files-content">
+            <div id="directory-controls">
+              <button id="open-directory-button">Open Folder</button>
+              <button id="refresh-folder-button" style="display: none;">Refresh</button>
+              <button id="reconnect-button" style="display: none;">Reconnect</button>
+              <button id="forget-folder-button" style="display: none;">Forget Folder</button>
+            </div>
+            <div id="file-tree"></div>
+        </div>
+        <div class="sidebar-content" id="search-content" style="display: none;">
+            <h3>Search in Files</h3>
+            <div class="search-panel">
+                <input class="search-input" type="text" id="search-input" placeholder="Search in files...">
+                <div class="search-options">
+                    <label><input type="checkbox" id="search-regex"> Regex</label>
+                    <label><input type="checkbox" id="search-case-sensitive"> Case Sensitive</label>
+                </div>
+                <button class="search-button" id="search-button">Search</button>
+            </div>
+            <div id="search-results-container"></div>
+        </div>
+        <div class="sidebar-content" id="tasks-content" style="display: none;">
+            
+            <div id="tasks-container"></div>
+        </div>
+    </div>
+      <div id="editor-container" class="main-content">
+        <div id="tab-bar"></div>
+        <div id="editor"></div>
+      </div>
+      <div id="chat-panel" class="sidebar">
+        <div class="chat-header">
+          <h2>AI Chat</h2>
+          <div id="llm-status-container" title="Click to change LLM provider">
+            <span class="status-label">Provider:</span>
+            <span id="llm-provider-status">...</span>
+          </div>
+          <div class="header-toolbar">
+            <button id="settings-toggle-button" title="Toggle Settings">⚙️</button>
+            <div class="toolbar-group" id="token-usage-display" style="display: flex;">
+              <span id="token-request">Req: 3333</span>
+              <span id="token-response">Res: 2241</span>
+              <span id="token-total">Total: 5574</span>
+            </div>
+          </div>
+        </div>
+        <div id="chat-messages"></div>
+        <div id="chat-input-container">
+          <div id="chat-toolbar">
+            <div class="toolbar-group">
+              <select id="agent-mode-selector" title="Select Agent Mode">
+                <option value="code" selected>Code</option>
+                <option value="amend">Amend Code</option>
+                <option value="search">Intelligent Search</option>
+              </select>
+            </div>
+            <div class="toolbar-group">
+              <div class="dropdown">
+                <button class="dropdown-button">Context</button>
+                <div class="dropdown-content">
+                  <button id="view-context-button">View Context</button>
+                  <button id="condense-context-button">Condense Context</button>
+                  <button id="clear-context-button">Clear Context</button>
+                  <button id="view-tool-logs-button">View Tool Logs</button>
+                </div>
+              </div>
+              <button id="format-button">Format Document</button>
+              <button id="fix-errors-button">Fix Errors</button>
+              <button id="view-checkpoints-button">Checkpoints</button>
+              <button id="custom-rules-button">Custom Rules</button>
+              <button id="toggle-files-button">Toggle Files</button>
+              <button id="undo-last-change-button" title="Undo Last File Change">Undo</button>
+            </div>
+          </div>
+          <div id="image-preview-container" style="display: none"></div>
+          <textarea
+            id="chat-input"
+            placeholder="Type your message..."
+          ></textarea>
+          <div id="chat-actions">
+            <input
+              type="file"
+              id="image-input"
+              accept="image/*"
+              style="display: none"
+            />
+            <button id="image-upload-button">📎</button>
+            <button id="chat-send-button">Send</button>
+            <button id="chat-cancel-button" style="display: none">
+              Cancel
+            </button>
+          </div>
+        </div>
+        <div id="llm-settings-panel">
+            <div class="settings-tabs">
+                <button class="tab-link active" data-tab="gemini-settings">Google Gemini</button>
+                <button class="tab-link" data-tab="openai-settings">OpenAI</button>
+                <button class="tab-link" data-tab="ollama-settings">Ollama</button>
+            </div>
+
+            <div id="gemini-settings" class="tab-content active">
+                <h3>Google Gemini Settings</h3>
+                <p>Enter one or more API keys, separated by new lines. They will be stored locally and rotated automatically.</p>
+                <div class="form-group">
+                    <label for="gemini-api-keys">API Keys</label>
+                    <div class="api-key-wrapper">
+                        <textarea id="gemini-api-keys" class="api-key-textarea" placeholder="Enter Gemini API keys..."></textarea>
+                        <button class="toggle-visibility-button">👁️</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="gemini-model-selector">Model</label>
+                    <select id="gemini-model-selector" class="model-selector">
+                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite</option>
+                        <option value="gemini-1.5-flash-latest">Gemini 1.5 Flash</option>
+                        <option value="gemini-1.5-pro-latest">Gemini 1.5 Pro</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="openai-settings" class="tab-content">
+                <h3>OpenAI Settings</h3>
+                 <div class="form-group">
+                    <label for="openai-api-key">API Key</label>
+                    <div class="api-key-wrapper">
+                        <input type="password" id="openai-api-key" class="api-key-input" placeholder="Enter OpenAI API key...">
+                        <button class="toggle-visibility-button">👁️</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="openai-model-selector">Model</label>
+                    <select id="openai-model-selector" class="model-selector">
+                        <option value="gpt-4.1">GPT-4.1</option>
+                        <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+                        <option value="gpt-4o">GPT-4o</option>
+                        <option value="gpt-4o-mini">GPT-4o Mini</option>
+                        <option value="o1-preview">o1-preview</option>
+                        <option value="o1-mini">o1-mini</option>
+                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                        <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="ollama-settings" class="tab-content">
+                <h3>Ollama Settings</h3>
+                <div class="form-group">
+                    <label for="ollama-base-url">Base URL</label>
+                    <input type="text" id="ollama-base-url" class="settings-input" placeholder="http://localhost:11434">
+                </div>
+                <div class="form-group">
+                    <label for="ollama-model-name">Model Name</label>
+                    <input type="text" id="ollama-model-name" class="settings-input" placeholder="e.g., llama3">
+                </div>
+            </div>
+
+            <div class="settings-actions">
+                <button id="save-llm-settings-button">Save Settings</button>
+                <button id="theme-toggle-button" title="Toggle Theme"></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+    <div id="context-modal" class="modal" style="display: none">
+      <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h2>Current Conversation Context</h2>
+        <pre id="context-display"></pre>
+      </div>
+    </div>
+
+    <div id="checkpoints-modal" class="modal" style="display: none">
+      <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h2>Project Checkpoints</h2>
+        <div class="checkpoint-controls">
+            <button id="create-checkpoint-button">Create New</button>
+            <button id="delete-selected-checkpoints-button" disabled>Delete Selected</button>
+            <label>
+                <input type="checkbox" id="select-all-checkpoints-checkbox" />
+                Select All
+            </label>
+        </div>
+        <div id="checkpoints-list-container">
+          <table id="checkpoints-table">
+            <thead>
+              <tr>
+                <th><input type="checkbox" id="select-all-checkpoints-checkbox-header" /></th>
+                <th>Name</th>
+                <th>File Path</th>
+                <th>Date</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="checkpoints-list"></tbody>
+          </table>
+        </div>
+        <div id="indexeddb-usage" class="storage-usage-info" style="margin-top: 12px; text-align: right; font-size: 0.95em; color: var(--text-secondary);">
+          Loading storage usage…
+        </div>
+      </div>
+    </div>
+
+    <div id="custom-rules-modal" class="modal" style="display: none">
+      <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h2>Custom Rules for <span id="custom-rules-mode-name"></span> Mode</h2>
+        <p>These rules will be added to the system prompt for the selected AI mode.</p>
+        <textarea id="custom-rules-textarea" placeholder="Enter custom rules here..."></textarea>
+        <button id="save-custom-rules-button">Save Rules</button>
+      </div>
+    </div>
+
+    <div id="tool-logs-modal" class="modal" style="display: none">
+      <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h2>Tool Execution History</h2>
+        <input type="text" id="tool-logs-filter" placeholder="Filter by tool name..." class="tool-logs-filter-input">
+        <div id="tool-logs-list"></div>
+      </div>
+    </div>
+
+    <!-- Load diff.js before Monaco loader to ensure Diff is globally available -->
+    <script src="https://cdn.jsdelivr.net/npm/diff@5.1.0/dist/diff.min.js"></script>
+    <script src="https://unpkg.com/gpt-tokenizer/dist/cl100k_base.js"></script>
+    <script src="js/lib/diff_match_patch.js"></script>
+    <!-- Monaco Editor Loader -->
+    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="js/vendor/split.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@2.3.8/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/acorn@8.12.1/dist/acorn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.2/dist/walk.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@9/dist/mermaid.min.js"></script>
+    <!-- jQuery and jsTree -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.3.12/jstree.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+    </script>
+    <script type="module">
+      import { GoogleGenerativeAI } from 'https://esm.run/@google/generative-ai';
+      window.GoogleGenerativeAI = GoogleGenerativeAI;
+    </script>
+    <script src="js/tool_logger.js" type="module"></script>
+    <script src="js/undo_manager.js" type="module"></script>
+    <script src="js/settings.js" type="module"></script>
+    <script src="js/todo_list_ui.js" type="module"></script>
+    <script type="module" src="js/main.js"></script>
+    <script type="module" src="js/events.js"></script>
+  </body>
+</html>

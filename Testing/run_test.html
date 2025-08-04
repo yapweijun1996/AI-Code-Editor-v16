@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research Test Runner</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 20px 0;
+        }
+        #output {
+            background-color: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            height: 400px;
+            overflow: auto;
+        }
+        .spinner {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top-color: #4285f4;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+            display: none;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>Multi-Stage Research Test Runner</h1>
+    <p>This page runs a test of the improved multi-stage research implementation.</p>
+    
+    <!-- Local tokenizer fallback to avoid dependency issues -->
+    <script src="./js/vendor/gpt-tokenizer.js"></script>
+    
+    <div id="test-controls">
+        <label for="query">Test Query:</label>
+        <input type="text" id="query" value="What are the main architectural patterns in software engineering?" style="width: 80%; padding: 8px; margin: 10px 0;">
+        
+        <div style="margin-top: 10px;">
+            <button id="runTest"><span class="spinner" id="spinner"></span>Run Research Test</button>
+            <button id="cleanupTasks" style="background-color: #34a853; margin-left: 10px;">Clean Up Stale Tasks</button>
+        </div>
+        
+        <div style="margin-top: 10px;">
+            <label>
+                <input type="checkbox" id="autoCleanup" checked>
+                Auto-cleanup after test (10 min threshold)
+            </label>
+        </div>
+    </div>
+    
+    <h2>Output:</h2>
+    <div id="output">Results will appear here...</div>
+    
+    <script type="module">
+        import { execute } from './js/tool_executor.js';
+        import { TaskTools } from './js/task_manager.js';
+        
+        const runTestBtn = document.getElementById('runTest');
+        const cleanupBtn = document.getElementById('cleanupTasks');
+        const autoCleanupCheckbox = document.getElementById('autoCleanup');
+        const queryInput = document.getElementById('query');
+        const outputDiv = document.getElementById('output');
+        const spinner = document.getElementById('spinner');
+        
+        // Custom console.log implementation to capture logs
+        const originalConsoleLog = console.log;
+        const originalConsoleError = console.error;
+        
+        console.log = function(...args) {
+            originalConsoleLog.apply(console, args);
+            
+            const message = args.map(arg => {
+                if (typeof arg === 'object') {
+                    try {
+                        return JSON.stringify(arg, null, 2);
+                    } catch (e) {
+                        return String(arg);
+                    }
+                } else {
+                    return String(arg);
+                }
+            }).join(' ');
+            
+            outputDiv.textContent += message + '\n';
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        };
+        
+        console.error = function(...args) {
+            originalConsoleError.apply(console, args);
+            
+            const message = args.map(arg => {
+                if (typeof arg === 'object') {
+                    try {
+                        return JSON.stringify(arg, null, 2);
+                    } catch (e) {
+                        return String(arg);
+                    }
+                } else {
+                    return String(arg);
+                }
+            }).join(' ');
+            
+            outputDiv.textContent += '❌ ERROR: ' + message + '\n';
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        };
+        
+        // Run test function
+        async function runTest() {
+            outputDiv.textContent = ''; // Clear previous output
+            spinner.style.display = 'inline-block';
+            runTestBtn.disabled = true;
+            
+            try {
+                const query = queryInput.value.trim();
+                
+                if (!query) {
+                    throw new Error('Please enter a research query');
+                }
+                
+                console.log(`🧪 Running research test with query: "${query}"`);
+                
+                // Create a tool call for the test_research tool
+                const toolCall = {
+                    name: 'test_research',
+                    args: { query }
+                };
+                
+                console.log('Executing test_research tool...');
+                const result = await execute(toolCall, null, false);
+                
+                console.log('✅ Test completed successfully!');
+                console.log('Result summary:', result.toolResponse?.response?.summary || 'No summary available');
+                
+                // Perform auto-cleanup if enabled
+                if (autoCleanupCheckbox.checked) {
+                    await cleanupStaleTasks(10 * 60 * 1000); // 10 minutes threshold
+                }
+            } catch (error) {
+                console.error('Test failed:', error);
+            } finally {
+                spinner.style.display = 'none';
+                runTestBtn.disabled = false;
+            }
+        }
+        
+        /**
+         * Cleans up stale tasks with a specified inactivity threshold
+         * @param {number} threshold - Inactivity threshold in milliseconds
+         */
+        async function cleanupStaleTasks(threshold = 30 * 60 * 1000) {
+            console.log(`🧹 Running task cleanup (threshold: ${threshold / (60 * 1000)} minutes)...`);
+            
+            // Temporarily update cleanup configuration
+            TaskTools.updateCleanupConfig({
+                inactivityThreshold: threshold,
+                action: 'complete'  // Mark as complete rather than delete
+            });
+            
+            try {
+                // Run the cleanup
+                await TaskTools.cleanupStale();
+                console.log('✅ Task cleanup completed successfully');
+                
+                // Reset to default settings
+                TaskTools.updateCleanupConfig({
+                    inactivityThreshold: 24 * 60 * 60 * 1000, // Reset to 24 hours
+                    action: 'complete'
+                });
+            } catch (error) {
+                console.error('❌ Task cleanup failed:', error);
+            }
+        }
+        
+        // Event listeners for buttons
+        runTestBtn.addEventListener('click', runTest);
+        cleanupBtn.addEventListener('click', () => cleanupStaleTasks(5 * 60 * 1000)); // 5 min threshold for manual cleanup
+    </script>
+</body>
+</html>

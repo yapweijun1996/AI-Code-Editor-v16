@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Session Test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #2563eb;
+        }
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        button {
+            background-color: #2563eb;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 8px;
+        }
+        button:hover {
+            background-color: #1d4ed8;
+        }
+        .success {
+            color: #10b981;
+            font-weight: bold;
+        }
+        .error {
+            color: #ef4444;
+            font-weight: bold;
+        }
+        pre {
+            background-color: #f8fafc;
+            padding: 12px;
+            border-radius: 4px;
+            overflow: auto;
+            font-size: 14px;
+            border: 1px solid #e5e7eb;
+        }
+        #log {
+            margin-top: 20px;
+            height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Task Session Functionality Test</h1>
+    
+    <div class="card">
+        <h2>Test Controls</h2>
+        <button id="createTaskBtn">1. Create Test Task</button>
+        <button id="startSessionBtn" disabled>2. Start Task Session</button>
+        <button id="checkStatusBtn" disabled>3. Verify Task Status</button>
+        <button id="cleanupBtn" disabled>4. Cleanup</button>
+    </div>
+    
+    <div class="card">
+        <h2>Test Results</h2>
+        <div id="results">
+            <p>No tests run yet. Click the buttons above to start testing.</p>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>Log</h2>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        // Import dependencies
+        import { taskManager, TaskTools } from './frontend/js/task_manager.js';
+        
+        // Test state
+        let testTaskId = null;
+        let testSessionId = null;
+        
+        // Utility function to log messages
+        function log(message, type = 'info') {
+            const logElement = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const logLine = document.createElement('div');
+            
+            if (type === 'error') {
+                logLine.classList.add('error');
+                logLine.textContent = `${timestamp} [ERROR] ${message}`;
+            } else if (type === 'success') {
+                logLine.classList.add('success');
+                logLine.textContent = `${timestamp} [SUCCESS] ${message}`;
+            } else {
+                logLine.textContent = `${timestamp} [INFO] ${message}`;
+            }
+            
+            logElement.appendChild(logLine);
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        // Utility function to update results
+        function updateResults(html) {
+            document.getElementById('results').innerHTML = html;
+        }
+        
+        // Initialize task manager
+        async function init() {
+            try {
+                log('Initializing task manager...');
+                await taskManager.initialize();
+                log('Task manager initialized successfully', 'success');
+            } catch (error) {
+                log(`Initialization error: ${error.message}`, 'error');
+            }
+        }
+        
+        // Step 1: Create a test task
+        async function createTestTask() {
+            try {
+                log('Creating test task...');
+                const task = await TaskTools.create({
+                    title: 'Test Task for Session',
+                    description: 'This task is created to test the start_task_session functionality',
+                    priority: 'medium'
+                });
+                
+                testTaskId = task.id;
+                log(`Task created with ID: ${task.id}`, 'success');
+                document.getElementById('startSessionBtn').disabled = false;
+                
+                updateResults(`
+                    <p><span class="success">✓</span> Created test task:</p>
+                    <pre>${JSON.stringify(task, null, 2)}</pre>
+                `);
+            } catch (error) {
+                log(`Failed to create task: ${error.message}`, 'error');
+                updateResults(`<p><span class="error">✗</span> Failed to create task: ${error.message}</p>`);
+            }
+        }
+        
+        // Step 2: Start a session using TaskTools directly
+        async function startTaskSession() {
+            try {
+                log('Starting task session...');
+                
+                // Use TaskTools.startSession directly 
+                const session = await TaskTools.startSession(testTaskId, {
+                    description: 'Test session',
+                    duration: 30 // 30 minutes
+                });
+                
+                testSessionId = session?.id;
+                
+                log('Session started successfully', 'success');
+                document.getElementById('checkStatusBtn').disabled = false;
+                
+                updateResults(`
+                    <p><span class="success">✓</span> Created test task</p>
+                    <p><span class="success">✓</span> Started task session:</p>
+                    <pre>${JSON.stringify(session, null, 2)}</pre>
+                `);
+            } catch (error) {
+                log(`Failed to start session: ${error.message}`, 'error');
+                updateResults(`
+                    <p><span class="success">✓</span> Created test task</p>
+                    <p><span class="error">✗</span> Failed to start session: ${error.message}</p>
+                `);
+            }
+        }
+        
+        // Step 3: Verify the task has been updated
+        async function verifyTaskStatus() {
+            try {
+                log('Verifying task status...');
+                const task = TaskTools.getById(testTaskId);
+                
+                if (!task) {
+                    throw new Error('Task not found');
+                }
+                
+                log(`Task status: ${task.status}`);
+                log(`Task has sessions: ${!!task.context.sessions}`);
+                
+                const success = task.status === 'in_progress' && task.context.sessions;
+                
+                if (success) {
+                    log('Task session functionality works correctly', 'success');
+                    document.getElementById('cleanupBtn').disabled = false;
+                    
+                    updateResults(`
+                        <p><span class="success">✓</span> Created test task</p>
+                        <p><span class="success">✓</span> Started task session</p>
+                        <p><span class="success">✓</span> Verified task status:</p>
+                        <ul>
+                            <li>Status: <strong>${task.status}</strong> (Expected: in_progress)</li>
+                            <li>Has sessions: <strong>${!!task.context.sessions}</strong> (Expected: true)</li>
+                        </ul>
+                        <p><span class="success">✓</span> <strong>TEST PASSED:</strong> Task session functionality works correctly</p>
+                    `);
+                } else {
+                    log('Task session did not update task properly', 'error');
+                    document.getElementById('cleanupBtn').disabled = false;
+                    
+                    updateResults(`
+                        <p><span class="success">✓</span> Created test task</p>
+                        <p><span class="success">✓</span> Started task session</p>
+                        <p><span class="error">✗</span> Verification failed:</p>
+                        <ul>
+                            <li>Status: <strong>${task.status}</strong> (Expected: in_progress)</li>
+                            <li>Has sessions: <strong>${!!task.context.sessions}</strong> (Expected: true)</li>
+                        </ul>
+                        <p><span class="error">✗</span> <strong>TEST FAILED:</strong> Task session did not update task properly</p>
+                    `);
+                }
+            } catch (error) {
+                log(`Verification error: ${error.message}`, 'error');
+                updateResults(`
+                    <p><span class="success">✓</span> Created test task</p>
+                    <p><span class="success">✓</span> Started task session</p>
+                    <p><span class="error">✗</span> Verification error: ${error.message}</p>
+                `);
+            }
+        }
+        
+        // Step 4: Clean up test task
+        async function cleanup() {
+            try {
+                log('Cleaning up test task...');
+                await TaskTools.delete(testTaskId);
+                log('Test task deleted successfully', 'success');
+                
+                // Reset test state
+                testTaskId = null;
+                testSessionId = null;
+                
+                // Reset buttons
+                document.getElementById('startSessionBtn').disabled = true;
+                document.getElementById('checkStatusBtn').disabled = true;
+                document.getElementById('cleanupBtn').disabled = true;
+                
+                updateResults(`
+                    <p><span class="success">✓</span> Created test task</p>
+                    <p><span class="success">✓</span> Started task session</p>
+                    <p><span class="success">✓</span> Verified task status</p>
+                    <p><span class="success">✓</span> Cleaned up test task</p>
+                    <p><strong>All tests completed successfully!</strong></p>
+                `);
+            } catch (error) {
+                log(`Cleanup error: ${error.message}`, 'error');
+                updateResults(`
+                    <p><span class="success">✓</span> Created test task</p>
+                    <p><span class="success">✓</span> Started task session</p>
+                    <p><span class="success">✓</span> Verified task status</p>
+                    <p><span class="error">✗</span> Cleanup error: ${error.message}</p>
+                `);
+            }
+        }
+        
+        // Set up event listeners once the DOM is loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('createTaskBtn').addEventListener('click', createTestTask);
+            document.getElementById('startSessionBtn').addEventListener('click', startTaskSession);
+            document.getElementById('checkStatusBtn').addEventListener('click', verifyTaskStatus);
+            document.getElementById('cleanupBtn').addEventListener('click', cleanup);
+            
+            // Initialize task manager
+            init();
+        });
+    </script>
+</body>
+</html>

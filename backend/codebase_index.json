@@ -1,0 +1,18 @@
+{
+  "frontend/js/tool_executor.js": [
+    "trackToolPerformance",
+    "getOptimalTool",
+    "analyzeError",
+    "getSuggestedFix",
+    "getCachedResult",
+    "setCachedResult"
+  ],
+  "frontend\\js\\tool_executor.js": [
+    "trackToolPerformance",
+    "getOptimalTool",
+    "analyzeError",
+    "getSuggestedFix",
+    "getCachedResult",
+    "setCachedResult"
+  ]
+}
