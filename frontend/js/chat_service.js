@@ -23,6 +23,7 @@ export const ChatService = {
         errorSignature: null,
         count: 0,
     },
+    currentHistory: null,
 
     async initialize(rootDirectoryHandle) {
         this.rootDirectoryHandle = rootDirectoryHandle;
@@ -520,16 +521,16 @@ Return ONLY "true" or "false" (no quotes, no explanation).`;
             const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
 
             // 3. Prepare for autonomous execution with enhanced context
-            const history = await DbManager.getChatHistory();
+            this.currentHistory = await DbManager.getChatHistory();
             
             // Use the enhanced message parts that may include auto-context
-            history.push({ role: 'user', parts: messageParts });
+            this.currentHistory.push({ role: 'user', parts: messageParts });
             
             // Add task breakdown instruction
-            history.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
+            this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
 
             // 3. First API Call: Force breakdown
-            await this._performApiCall(history, chatMessages, true); // singleTurn = true
+            await this._performApiCall(this.currentHistory, chatMessages, true); // singleTurn = true
 
             // 4. Enhanced Autonomous Execution Loop with Adaptive Planning
             let nextTask = taskManager.getNextTask();
@@ -550,12 +551,12 @@ Context: ${contextInfo}
 
 Execute this task step by step. When completed, call the task_update tool to mark it as completed. Task ID: ${nextTask.id}`;
                 
-                history.push({ role: 'user', parts: [{ text: prompt }] });
+                this.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
                 
                 let executionResult = null;
                 try {
                     const startTime = Date.now();
-                    await this._performApiCall(history, chatMessages, false); // singleTurn = false to allow tool chains
+                    await this._performApiCall(this.currentHistory, chatMessages, false); // singleTurn = false to allow tool chains
                     const endTime = Date.now();
                     
                     // Check if the task is still in progress (AI should have updated it)
@@ -675,7 +676,7 @@ Execute this task step by step. When completed, call the task_update tool to mar
                 }
             }
             
-            await DbManager.saveChatHistory(history);
+            await DbManager.saveChatHistory(this.currentHistory);
 
         } catch (error) {
             UI.showError(`An error occurred: ${error.message}`);
@@ -683,6 +684,7 @@ Execute this task step by step. When completed, call the task_update tool to mar
         } finally {
             this.isSending = false;
             this._updateUiState(false);
+            this.currentHistory = null;
             // Don't clear input here since it's already cleared in _prepareAndRenderUserMessage
         }
     },

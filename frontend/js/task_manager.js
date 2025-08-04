@@ -354,9 +354,9 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
 
         try {
             // Send prompt without tools to avoid confusion
-            const response = await ChatService.sendPrompt(prompt, { 
+            const response = await ChatService.sendPrompt(prompt, {
                 tools: [], // No tools needed for JSON response
-                history: [] // Fresh conversation context
+                history: ChatService.currentHistory || [] // Use live history
             });
             
             // Extract JSON from response with more robust parsing
