@@ -235,6 +235,29 @@ export const DbManager = {
             transaction.onerror = () => reject('Error saving multiple settings.');
         });
     },
+    async saveCustomRule(ruleId, value) {
+        const db = await this.openDb();
+        return new Promise((resolve, reject) => {
+            const request = db
+                .transaction(this.stores.customRules, 'readwrite')
+                .objectStore(this.stores.customRules)
+                .put({ id: ruleId, value: value });
+            request.onerror = () => reject('Error saving custom rule.');
+            request.onsuccess = () => resolve();
+        });
+    },
+    async getCustomRule(ruleId) {
+        const db = await this.openDb();
+        return new Promise((resolve) => {
+            const request = db
+                .transaction(this.stores.customRules, 'readonly')
+                .objectStore(this.stores.customRules)
+                .get(ruleId);
+            request.onerror = () => resolve(null);
+            request.onsuccess = () =>
+                resolve(request.result ? request.result.value : null);
+        });
+    },
     async saveChatHistory(history) {
         const db = await this.openDb();
         return new Promise((resolve, reject) => {
