@@ -1210,7 +1210,7 @@ async function _createDiff({ original_content, new_content }) {
 async function _smartEditFile({ filename, edits }, rootHandle) {
     if (!filename) throw new Error("The 'filename' parameter is required.");
     if (!edits || !Array.isArray(edits)) throw new Error("The 'edits' parameter is required and must be an array.");
-    
+
     // Validate that each edit has a valid type property early
     for (const edit of edits) {
         if (!edit.type) {
@@ -1220,9 +1220,9 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
             throw new Error(`Invalid edit type: '${edit.type}'. Valid types are: 'replace_lines', 'insert_lines'`);
         }
     }
-    
+
     const fileHandle = await FileSystem.getFileHandleFromPath(rootHandle, filename);
-    
+
     // Enhanced permission handling - try to proceed even if permission check fails
     let hasPermission = false;
     try {
@@ -1231,30 +1231,31 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
         console.warn('Permission check failed, attempting to proceed:', permissionError.message);
         hasPermission = true; // Optimistically proceed
     }
-    
+
     if (!hasPermission) {
         throw new Error('Permission to write to the file was denied.');
     }
-    
+
     const file = await fileHandle.getFile();
     const fileSize = file.size;
     console.log(`_smartEditFile: Processing ${filename} (${fileSize} bytes)`);
-    
+
     // For very large files (>500KB), use streaming approach
     if (fileSize > 500000) {
+        // TODO: Add content verification to streaming edits as well
         return await _streamingEditFile({ filename, edits, fileHandle, file });
     }
-    
+
     const originalContent = await file.text();
     UndoManager.push(filename, originalContent);
-    
+
     let lines = originalContent.split(/\r?\n/);
     const originalLineCount = lines.length;
-    
-    // Enhanced validation with better error messages and graceful clamping
+
+    // Enhanced validation with content verification and better error messages
     for (const edit of edits) {
         if (edit.type === 'replace_lines') {
-            let { start_line, end_line } = edit;
+            let { start_line, end_line, new_content, expected_content } = edit;
             if (typeof start_line !== 'number' || typeof end_line !== 'number') {
                 throw new Error(`Invalid line numbers in edit: start_line=${start_line}, end_line=${end_line}`);
             }
@@ -1267,11 +1268,34 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
             if (start_line > originalLineCount) {
                  throw new Error(`start_line (${start_line}) exceeds file length (${originalLineCount}).`);
             }
-            // Gracefully clamp the end_line if it exceeds the file length
             if (end_line > originalLineCount) {
                 console.warn(`Warning: end_line (${end_line}) exceeds file length (${originalLineCount}). Clamping to ${originalLineCount}.`);
                 edit.end_line = originalLineCount;
+                end_line = originalLineCount; // update local variable
             }
+
+            // *** NEW: Content Verification ***
+            if (expected_content) {
+                // end_line is inclusive, so slice up to end_line
+                const actual_content = lines.slice(start_line - 1, end_line).join('\n');
+                // Using trim() to be more robust against whitespace differences at the start/end of the block
+                if (actual_content.trim() !== expected_content.trim()) {
+                    const error = new Error(`Content mismatch at lines ${start_line}-${end_line}. The file content has likely changed. Please read the file again and construct a new edit.`);
+                    error.details = {
+                        filename,
+                        start_line,
+                        end_line,
+                        expected: expected_content,
+                        actual: actual_content
+                    };
+                    throw error;
+                }
+            } else {
+                // If no expected_content is provided, log a warning.
+                // This makes the tool safer by default while allowing old calls to work with a warning.
+                console.warn(`Warning: 'replace_lines' edit for '${filename}' at lines ${start_line}-${end_line} was performed without 'expected_content' verification. This is unsafe and will be deprecated.`);
+            }
+
         } else if (edit.type === 'insert_lines') {
             const { line_number } = edit;
             if (typeof line_number !== 'number' || line_number < 0 || line_number > originalLineCount) {
@@ -1283,37 +1307,37 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
             throw new Error(`Unsupported edit type: ${edit.type}. Must be one of: 'replace_lines', 'insert_lines'`);
         }
     }
-    
+
     // Apply edits in reverse order to maintain line numbers
     const sortedEdits = [...edits].sort((a, b) => {
         const aLine = a.type === 'insert_lines' ? a.line_number : a.start_line;
         const bLine = b.type === 'insert_lines' ? b.line_number : b.start_line;
         return bLine - aLine;
     });
-    
+
     for (const edit of sortedEdits) {
         if (edit.type === 'replace_lines') {
             const { start_line, end_line, new_content } = edit;
             const cleanContent = stripMarkdownCodeBlock(new_content || '');
             const newLines = cleanContent.split(/\r?\n/);
-            
+
             // Replace the specified range with new content
-            // end_line is exclusive: start_line=95, end_line=600 replaces lines 95-599
+            // end_line is inclusive for replacement
             const before = lines.slice(0, start_line - 1);
-            const after = lines.slice(end_line - 1);
+            const after = lines.slice(end_line); // Corrected from end_line - 1
             lines = [...before, ...newLines, ...after];
         } else if (edit.type === 'insert_lines') {
             const { line_number, new_content } = edit;
             const cleanContent = stripMarkdownCodeBlock(new_content || '');
             const newLines = cleanContent.split(/\r?\n/);
-            
+
             // Insert at the specified line number
             const before = lines.slice(0, line_number);
             const after = lines.slice(line_number);
             lines = [...before, ...newLines, ...after];
         }
     }
-    
+
     await toolLogger.log('_smartEditFile', {
         filename,
         fileSize,
@@ -1321,30 +1345,30 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
         finalLineCount: lines.length,
         editsApplied: edits.length
     }, 'Success');
-    
+
     // Preserve original line endings
     const lineEnding = originalContent.includes('\r\n') ? '\r\n' : '\n';
     const newContent = lines.join(lineEnding);
-    
+
     // Final validation of the fully assembled content before writing, but do not block
     const validationResult = await validateSyntaxBeforeWrite(filename, newContent);
 
     const writable = await fileHandle.createWritable();
     await writable.write(newContent);
     await writable.close();
-    
+
     // Only refresh editor for smaller files to avoid performance issues
     if (fileSize < 100000 && Editor.getOpenFiles().has(filename)) {
         Editor.getOpenFiles().get(filename)?.model.setValue(newContent);
     }
-    
+
     // Only auto-open if file is small enough
     if (fileSize < 50000) {
         await Editor.openFile(fileHandle, filename, document.getElementById('tab-bar'), false);
     }
-    
+
     document.getElementById('chat-input').focus();
-    
+
     let message = `Smart edit applied to '${filename}' successfully. ${edits.length} edit(s) applied.`;
     if (!validationResult.isValid) {
         message += `\n\nWARNING: Syntax errors were detected and have been written to the file.\nErrors:\n${validationResult.errors}${validationResult.suggestions}`;
@@ -3930,7 +3954,7 @@ export function getToolDefinitions() {
             // REMOVED: insert_content, create_and_apply_diff, replace_lines - simplified to use rewrite_file only
             { name: 'format_code', description: "Formats a file with Prettier. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
             { name: 'analyze_code', description: "Analyzes a JavaScript file's structure. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
-            { name: 'edit_file', description: "The primary tool for all file modifications. CRITICAL: Before using this tool to fix an error, you MUST use 'read_file' to get the full, up-to-date content of the file. CRITICAL: If the content you are using was retrieved with line numbers, you MUST remove the line numbers and the ` | ` separator from every line before using it in the 'new_content' or 'content' parameter. The content must be the raw source code. Provide EITHER 'content' for a full rewrite OR an 'edits' array for targeted changes.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING', description: 'Complete file content for small files. CRITICAL: Do NOT wrap in markdown backticks.' }, edits: { type: 'ARRAY', items: { type: 'OBJECT', properties: { type: { type: 'STRING', enum: ['replace_lines', 'insert_lines'] }, start_line: { type: 'NUMBER', description: 'Start line for replace_lines' }, end_line: { type: 'NUMBER', description: 'End line for replace_lines' }, line_number: { type: 'NUMBER', description: 'Line position for insert_lines (0=start of file)' }, new_content: { type: 'STRING' } } }, description: 'Efficient targeted edits for large files. Use replace_lines to replace line ranges or insert_lines to add content.' } }, required: ['filename'] } },
+            { name: 'edit_file', description: "The primary tool for all file modifications. CRITICAL: Before using this tool to fix an error, you MUST use 'read_file' to get the full, up-to-date content of the file. CRITICAL: If the content you are using was retrieved with line numbers, you MUST remove the line numbers and the ` | ` separator from every line before using it in the 'new_content' or 'content' parameter. The content must be the raw source code. Provide EITHER 'content' for a full rewrite OR an 'edits' array for targeted changes.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING', description: 'Complete file content for small files. CRITICAL: Do NOT wrap in markdown backticks.' }, edits: { type: 'ARRAY', items: { type: 'OBJECT', properties: { type: { type: 'STRING', enum: ['replace_lines', 'insert_lines'] }, start_line: { type: 'NUMBER', description: 'Start line for replace_lines (inclusive)' }, end_line: { type: 'NUMBER', description: 'End line for replace_lines (inclusive)' }, expected_content: { type: 'STRING', description: 'SAFETY: The exact content of the lines to be replaced. If this does not match, the edit will fail.' }, line_number: { type: 'NUMBER', description: 'Line position for insert_lines (0=start of file)' }, new_content: { type: 'STRING' } } }, description: 'Efficient targeted edits for large files. Use replace_lines to replace line ranges or insert_lines to add content.' } }, required: ['filename'] } },
             { name: 'append_to_file', description: "Fast append content to end of file without reading full content. Ideal for logs, incremental updates.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING', description: 'Content to append. Will add newline separator automatically.' } }, required: ['filename', 'content'] } },
             { name: 'get_file_info', description: "Get file metadata (size, last modified, type) without reading content. Use before editing large files.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
             { name: 'rewrite_file', description: "DEPRECATED and REMOVED. Use 'edit_file' instead.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING' } }, required: ['filename', 'content'] } },
