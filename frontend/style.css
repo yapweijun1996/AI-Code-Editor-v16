@@ -166,6 +166,10 @@ body.resizing {
   flex-direction: column;
 }
 
+#files-content{
+    overflow: auto;
+}
+
 #editor-container {
   display: flex;
   flex-direction: column;
