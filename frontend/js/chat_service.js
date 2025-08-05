@@ -486,7 +486,6 @@ Return ONLY "true" or "false" (no quotes, no explanation).`;
     },
 
     async sendMessage(chatInput, chatMessages, chatSendButton, chatCancelButton, uploadedImage, clearImagePreview) {
-        // Handle both DOM elements and string inputs
         let userPrompt;
         if (typeof chatInput === 'string') {
             userPrompt = chatInput.trim();
@@ -495,189 +494,38 @@ Return ONLY "true" or "false" (no quotes, no explanation).`;
         } else {
             userPrompt = '';
         }
-        
+
         if ((!userPrompt && !uploadedImage) || this.isSending) return;
 
-        // Clear all pending and in-progress tasks before starting a new message
-        await taskManager.clearActiveTasks();
- 
         this.isSending = true;
         this.isCancelled = false;
-        
-        // Only update UI if we have DOM elements
-        if (chatSendButton && chatCancelButton) {
-            this._updateUiState(true);
-        }
+        if (chatSendButton && chatCancelButton) this._updateUiState(true);
         this.resetErrorTracker();
 
         try {
-            // 1. Prepare user message with intelligent context injection
-            const messageParts = this._prepareAndRenderUserMessage(chatInput, chatMessages, uploadedImage, clearImagePreview);
+            // 1. Render user message immediately
+            this._prepareAndRenderUserMessage(chatInput, chatMessages, uploadedImage, clearImagePreview);
             
-            // 2. Create a main task for the user's prompt
-            if (chatMessages) {
-                UI.appendMessage(chatMessages, `Task created: "${userPrompt}"`, 'ai');
-            }
-            const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
-
-            // 3. Prepare for autonomous execution with enhanced context
+            // 2. AI-driven intent classification
             this.currentHistory = await DbManager.getChatHistory();
+            const classificationResult = await this._classifyMessageIntent(userPrompt, this._getRecentContext());
+            const intent = classificationResult.split('\n')[0].replace('Response format:', '').trim();
             
-            // Use the enhanced message parts that may include auto-context
-            this.currentHistory.push({ role: 'user', parts: messageParts });
-            
-            // Add task breakdown instruction
-            this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
+            UI.appendMessage(chatMessages, `AI classified intent as: ${intent}`, 'ai-muted');
 
-            // 3. First API Call: Force breakdown
-            await this._performApiCall(this.currentHistory, chatMessages, true); // singleTurn = true
-
-            // 4. Enhanced Autonomous Execution Loop with Adaptive Planning
-            let nextTask = taskManager.getNextTask();
-            let executionAttempts = 0;
-            const maxExecutionAttempts = 10; // Prevent infinite loops
-            
-            while (nextTask && !this.isCancelled && executionAttempts < maxExecutionAttempts) {
-                executionAttempts++;
-                
-                UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
-                await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
-                
-                // Enhanced prompt with context awareness
-                const contextInfo = this._buildTaskContext(nextTask);
-                const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
-                
-Context: ${contextInfo}
-
-Execute this task step by step. When completed, call the task_update tool to mark it as completed. Task ID: ${nextTask.id}`;
-                
-                this.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
-                
-                let executionResult = null;
-                try {
-                    const startTime = Date.now();
-                    await this._performApiCall(this.currentHistory, chatMessages, false); // singleTurn = false to allow tool chains
-                    const endTime = Date.now();
-                    
-                    // Check if the task is still in progress (AI should have updated it)
-                    const updatedTask = taskManager.tasks.get(nextTask.id);
-                    if (updatedTask && updatedTask.status === 'in_progress') {
-                        // AI didn't mark as completed, so we do it automatically
-                        await taskManager.updateTask(nextTask.id, {
-                            status: 'completed',
-                            results: {
-                                completedAutomatically: true,
-                                timestamp: Date.now(),
-                                executionTime: endTime - startTime
-                            }
-                        });
-                        executionResult = { success: true, executionTime: endTime - startTime };
-                    } else {
-                        executionResult = {
-                            success: updatedTask?.status === 'completed',
-                            status: updatedTask?.status,
-                            results: updatedTask?.results
-                        };
-                    }
-                    
-                } catch (error) {
-                    console.error(`[ChatService] Error executing task ${nextTask.id}:`, error);
-                    
-                    // Enhanced error handling with recovery attempts
-                    const errorAnalysis = this._analyzeTaskError(nextTask, error);
-                    executionResult = {
-                        error: error.message,
-                        timestamp: Date.now(),
-                        analysis: errorAnalysis
-                    };
-                    
-                    if (errorAnalysis.canRecover && errorAnalysis.retryCount < 2) {
-                        // Attempt recovery
-                        UI.appendMessage(chatMessages, `Task "${nextTask.title}" encountered an error. Attempting recovery...`, 'ai');
-                        
-                        await taskManager.updateTask(nextTask.id, {
-                            status: 'pending', // Reset to pending for retry
-                            context: {
-                                ...nextTask.context,
-                                errorHistory: [...(nextTask.context?.errorHistory || []), {
-                                    error: error.message,
-                                    timestamp: Date.now(),
-                                    retryCount: errorAnalysis.retryCount + 1
-                                }]
-                            }
-                        });
-                        
-                        // Try adaptive re-planning
-                        await taskManager.replanBasedOnResults(nextTask.id, executionResult);
-                        
-                    } else {
-                        // Mark as failed after exhausting recovery options
-                        await taskManager.updateTask(nextTask.id, {
-                            status: 'failed',
-                            results: executionResult
-                        });
-                        UI.appendMessage(chatMessages, `Task "${nextTask.title}" failed after recovery attempts: ${error.message}`, 'ai');
-                        
-                        // Try adaptive re-planning even for failed tasks
-                        await taskManager.replanBasedOnResults(nextTask.id, executionResult);
-                    }
-                }
-                
-                // Adaptive re-planning based on execution results
-                if (executionResult && !executionResult.error) {
-                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
-                }
-                
-                // Get the next task (may have changed due to re-planning)
-                nextTask = taskManager.getNextTask();
-                
-                // Safety check: if we keep getting the same failed task, break the loop
-                if (nextTask && nextTask.status === 'failed' && executionAttempts > 3) {
-                    console.warn(`[ChatService] Breaking execution loop - repeated failed task: ${nextTask.title}`);
+            // 3. Route to the appropriate handler based on AI's decision
+            switch (intent) {
+                case 'TASK':
+                    await this._handleTaskCreation(userPrompt, chatMessages);
                     break;
-                }
+                case 'TOOL':
+                    await this._handleToolExecution(userPrompt, chatMessages);
+                    break;
+                case 'DIRECT':
+                default:
+                    await this._handleDirectResponse(userPrompt, chatMessages);
+                    break;
             }
-            
-            if (executionAttempts >= maxExecutionAttempts) {
-                UI.appendMessage(chatMessages, 'Execution stopped: Maximum attempts reached to prevent infinite loops.', 'ai');
-            }
-
-            if (this.isCancelled) {
-                UI.appendMessage(chatMessages, 'Execution cancelled by user.', 'ai');
-                await taskManager.updateTask(mainTask.id, { 
-                    status: 'failed',
-                    results: { cancelled: true, timestamp: Date.now() }
-                });
-            } else {
-                // Check if all subtasks are completed
-                const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
-                const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
-                const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
-                
-                if (failedSubtasks.length > 0) {
-                    await taskManager.updateTask(mainTask.id, { 
-                        status: 'failed',
-                        results: { 
-                            completedSubtasks: completedSubtasks.length,
-                            failedSubtasks: failedSubtasks.length,
-                            timestamp: Date.now()
-                        }
-                    });
-                    UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');
-                } else {
-                    await taskManager.updateTask(mainTask.id, { 
-                        status: 'completed',
-                        results: { 
-                            completedSubtasks: completedSubtasks.length,
-                            timestamp: Date.now()
-                        }
-                    });
-                    UI.appendMessage(chatMessages, `Main task "${mainTask.title}" completed successfully! All ${completedSubtasks.length} subtasks finished.`, 'ai');
-                }
-            }
-            
-            await DbManager.saveChatHistory(this.currentHistory);
-
         } catch (error) {
             UI.showError(`An error occurred: ${error.message}`);
             console.error('Chat Error:', error);
@@ -685,8 +533,169 @@ Execute this task step by step. When completed, call the task_update tool to mar
             this.isSending = false;
             this._updateUiState(false);
             this.currentHistory = null;
-            // Don't clear input here since it's already cleared in _prepareAndRenderUserMessage
         }
+    },
+
+    /**
+     * Asks the AI to classify the user's intent to determine the correct handling logic.
+     * @param {string} userPrompt - The user's message.
+     * @param {string} conversationContext - Recent conversation history.
+     * @returns {Promise<string>} The AI's classification (DIRECT, TASK, or TOOL).
+     */
+    async _classifyMessageIntent(userPrompt, conversationContext = '') {
+        const classificationPrompt = `
+Conversation context:
+${conversationContext}
+
+User message: "${userPrompt}"
+
+Classify this message into ONE category:
+- DIRECT: Simple questions, explanations, greetings, thanks, casual conversation.
+- TASK: Complex work requiring multiple steps, project-level changes, "create/build/implement" requests.
+- TOOL: Specific actions needing tools but not full task management (e.g., "read file.js").
+
+Consider complexity, intent, and whether it needs breakdown into subtasks.
+
+Response format: DIRECT|TASK|TOOL
+Reason: [brief explanation]`;
+
+        // Use sendPrompt for a direct, non-chatty response
+        return await this.sendPrompt(classificationPrompt, { history: this.currentHistory });
+    },
+
+    /**
+     * Retrieves the last few messages to provide context for the AI's decisions.
+     * @param {number} messageCount - The number of recent messages to retrieve.
+     * @returns {string} A formatted string of recent messages.
+     */
+    _getRecentContext(messageCount = 3) {
+        const recentMessages = this.currentHistory?.slice(-messageCount) || [];
+        if (recentMessages.length === 0) return "No recent conversation.";
+        return recentMessages.map(msg => {
+            const content = msg.parts.map(part => part.text || '').join(' ');
+            return `${msg.role}: ${content}`;
+        }).join('\n');
+    },
+
+    /**
+     * Handles simple, direct interactions that don't require the task management system.
+     * @param {string} userPrompt - The user's message.
+     * @param {HTMLElement} chatMessages - The chat messages container.
+     */
+    async _handleDirectResponse(userPrompt, chatMessages) {
+        this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
+        await this._performApiCall(this.currentHistory, chatMessages, true); // singleTurn = true
+        await DbManager.saveChatHistory(this.currentHistory);
+    },
+
+    /**
+     * Handles direct requests to execute a tool. (Placeholder for future enhancement)
+     * @param {string} userPrompt - The user's message.
+     * @param {HTMLElement} chatMessages - The chat messages container.
+     */
+    async _handleToolExecution(userPrompt, chatMessages) {
+        // For now, treat as a direct response. Can be enhanced later to parse and run tools.
+        UI.appendMessage(chatMessages, "Tool execution pathway triggered. For now, treating as a direct question.", 'ai-muted');
+        await this._handleDirectResponse(userPrompt, chatMessages);
+    },
+
+    /**
+     * Handles complex tasks that require breakdown and the full task management system.
+     * This function encapsulates the original, complex logic of `sendMessage`.
+     * @param {string} userPrompt - The user's message.
+     * @param {HTMLElement} chatMessages - The chat messages container.
+     */
+    async _handleTaskCreation(userPrompt, chatMessages) {
+        // This is the original, complex logic, now conditionally executed.
+        await taskManager.clearActiveTasks();
+        UI.appendMessage(chatMessages, `Task created: "${userPrompt}"`, 'ai');
+        const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
+
+        this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
+        this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
+
+        await this._performApiCall(this.currentHistory, chatMessages, true); // Force breakdown
+
+        let nextTask = taskManager.getNextTask();
+        let executionAttempts = 0;
+        const maxExecutionAttempts = 10;
+
+        while (nextTask && !this.isCancelled && executionAttempts < maxExecutionAttempts) {
+            executionAttempts++;
+            UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
+            await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
+
+            const contextInfo = this._buildTaskContext(nextTask);
+            const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
+Context: ${contextInfo}
+Execute this task step by step. When completed, call the task_update tool to mark it as completed. Task ID: ${nextTask.id}`;
+            
+            this.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
+
+            let executionResult = null;
+            try {
+                const startTime = Date.now();
+                await this._performApiCall(this.currentHistory, chatMessages, false);
+                const endTime = Date.now();
+                const updatedTask = taskManager.tasks.get(nextTask.id);
+                if (updatedTask && updatedTask.status === 'in_progress') {
+                    await taskManager.updateTask(nextTask.id, {
+                        status: 'completed',
+                        results: { completedAutomatically: true, timestamp: Date.now(), executionTime: endTime - startTime }
+                    });
+                    executionResult = { success: true, executionTime: endTime - startTime };
+                } else {
+                    executionResult = { success: updatedTask?.status === 'completed', status: updatedTask?.status, results: updatedTask?.results };
+                }
+            } catch (error) {
+                console.error(`[ChatService] Error executing task ${nextTask.id}:`, error);
+                const errorAnalysis = this._analyzeTaskError(nextTask, error);
+                executionResult = { error: error.message, timestamp: Date.now(), analysis: errorAnalysis };
+                if (errorAnalysis.canRecover && errorAnalysis.retryCount < 2) {
+                    UI.appendMessage(chatMessages, `Task "${nextTask.title}" encountered an error. Attempting recovery...`, 'ai');
+                    await taskManager.updateTask(nextTask.id, {
+                        status: 'pending',
+                        context: { ...nextTask.context, errorHistory: [...(nextTask.context?.errorHistory || []), { error: error.message, timestamp: Date.now(), retryCount: errorAnalysis.retryCount + 1 }] }
+                    });
+                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
+                } else {
+                    await taskManager.updateTask(nextTask.id, { status: 'failed', results: executionResult });
+                    UI.appendMessage(chatMessages, `Task "${nextTask.title}" failed after recovery attempts: ${error.message}`, 'ai');
+                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
+                }
+            }
+
+            if (executionResult && !executionResult.error) {
+                await taskManager.replanBasedOnResults(nextTask.id, executionResult);
+            }
+
+            nextTask = taskManager.getNextTask();
+            if (nextTask && nextTask.status === 'failed' && executionAttempts > 3) {
+                console.warn(`[ChatService] Breaking execution loop - repeated failed task: ${nextTask.title}`);
+                break;
+            }
+        }
+
+        if (executionAttempts >= maxExecutionAttempts) {
+            UI.appendMessage(chatMessages, 'Execution stopped: Maximum attempts reached.', 'ai');
+        }
+
+        if (this.isCancelled) {
+            UI.appendMessage(chatMessages, 'Execution cancelled by user.', 'ai');
+            await taskManager.updateTask(mainTask.id, { status: 'failed', results: { cancelled: true, timestamp: Date.now() } });
+        } else {
+            const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
+            const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
+            const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
+            if (failedSubtasks.length > 0) {
+                await taskManager.updateTask(mainTask.id, { status: 'failed', results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
+                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');
+            } else {
+                await taskManager.updateTask(mainTask.id, { status: 'completed', results: { completedSubtasks: completedSubtasks.length, timestamp: Date.now() } });
+                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" completed successfully! All ${completedSubtasks.length} subtasks finished.`, 'ai');
+            }
+        }
+        await DbManager.saveChatHistory(this.currentHistory);
     },
 
     cancelMessage() {
