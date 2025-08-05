@@ -15,14 +15,14 @@ export class OpenAIService extends BaseLLMService {
         return !!currentApiKey;
     }
 
-    async *sendMessageStream(history, tools, customRules) {
+    async *sendMessageStream(history, tools, customRules, options = {}) {
         await this.apiKeyManager.loadKeys('openai');
         const currentApiKey = this.apiKeyManager.getCurrentKey();
         if (!currentApiKey) {
             throw new Error("OpenAI API key is not set or available.");
         }
 
-        const messages = this._prepareMessages(history, customRules);
+        const messages = this._prepareMessages(history, customRules, options);
         const toolDefinitions = this._prepareTools(tools);
 
         const controller = new AbortController();
@@ -106,9 +106,9 @@ export class OpenAIService extends BaseLLMService {
         }
     }
 
-    _prepareMessages(history, customRules) {
+    _prepareMessages(history, customRules, options = {}) {
         const mode = document.getElementById('agent-mode-selector')?.value || 'code';
-        const systemPrompt = this._getSystemPrompt(mode, customRules);
+        const systemPrompt = this._getSystemPrompt(mode, customRules, options);
         const messages = [{ role: 'system', content: systemPrompt }];
 
         // Track tool calls to ensure proper pairing
@@ -197,12 +197,12 @@ export class OpenAIService extends BaseLLMService {
         return cleanedMessages;
     }
 
-    _getSystemPrompt(mode, customRules) {
+    _getSystemPrompt(mode, customRules, options = {}) {
         const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         const timeString = new Date().toLocaleString();
         
         
-        const baseCodePrompt = `You are GPT, an advanced AI programming agent optimized for precise code generation and tool utilization. Your purpose is to solve programming challenges through systematic analysis and efficient execution.
+        let baseCodePrompt = `You are GPT, an advanced AI programming agent optimized for precise code generation and tool utilization. Your purpose is to solve programming challenges through systematic analysis and efficient execution.
 
 # OPENAI AGENT OPTIMIZATION
 - **Tool Calling Excellence**: You excel at structured function calling. Always use the most appropriate tool for each task.
@@ -214,7 +214,7 @@ export class OpenAIService extends BaseLLMService {
 
 **1. SYSTEMATIC PROBLEM SOLVING**
 - Analyze user requests to identify core requirements
-- Plan your approach using available tools strategically  
+- Plan your approach using available tools strategically
 - Execute your plan step-by-step with clear explanations
 - Validate results and handle any errors appropriately
 
@@ -239,7 +239,26 @@ export class OpenAIService extends BaseLLMService {
 - Read existing code to understand structure and patterns
 - Plan modifications to maintain code quality and consistency
 - Apply changes using the most appropriate tool
-- Explain the changes and their impact
+- Explain the changes and their impact`;
+
+        // Conditionally add task management rules based on the execution context
+        if (options.directAnalysis) {
+            baseCodePrompt += `
+
+# DIRECT ANALYSIS MODE
+- You are in "Direct Analysis Mode". Your goal is to provide a direct, focused, and proactive answer based on the user's request and the provided context.
+- DO NOT use task management tools (\`start_task_session\`, etc.).
+- Your response MUST follow the structure below.
+
+**Response Structure:**
+1.  **Full Analysis**: Provide your detailed review, explanation, or answer to the user's request.
+2.  **Summary**: After your full analysis, provide a brief, bulleted summary of the key findings.
+3.  **Suggested Next Steps**: Based on your analysis, suggest 2-3 logical and actionable next steps. Frame them as questions.
+    - Example: "Would you like me to apply the recommended fix to line 42?"
+    - Example: "Should I proceed with refactoring the database connection logic?"
+4.  **Engage**: End by asking the user how they would like to proceed.`;
+        } else {
+            baseCodePrompt += `
 
 **6. TASK MANAGEMENT & PRODUCTIVITY TOOLS - MANDATORY USAGE**
 - **IMMEDIATE ACTION REQUIRED:** Before starting ANY multi-step task, you MUST call \`start_task_session\` first. This is NOT optional.
@@ -254,7 +273,10 @@ export class OpenAIService extends BaseLLMService {
   - Use \`todo_list\` to show existing todos
   - Tell users they can access todo list anytime with Ctrl+T
 
-**MANDATORY RULE: If a user request involves more than reading a single file, you MUST start with \`start_task_session\`. NO EXCEPTIONS!**
+**MANDATORY RULE: If a user request involves more than reading a single file, you MUST start with \`start_task_session\`. NO EXCEPTIONS!**`;
+        }
+
+        baseCodePrompt += `
 
 Current context:
 - Time: ${timeString}

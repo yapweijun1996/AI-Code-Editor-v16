@@ -245,7 +245,7 @@ export const ChatService = {
     },
 
     async _performApiCall(history, chatMessages, options = {}) {
-        const { singleTurn = false, useTools = true } = options;
+        const { singleTurn = false, useTools = true, directAnalysis = false } = options;
 
         if (!this.llmService) {
             UI.showError("LLM Service is not initialized. Please check your settings.");
@@ -292,7 +292,7 @@ export const ChatService = {
                     }
                 }
                 
-                const stream = this.llmService.sendMessageStream(history, tools, customRules);
+                const stream = this.llmService.sendMessageStream(history, tools, customRules, { directAnalysis });
 
                 let modelResponseText = '';
                 let displayText = '';
@@ -538,28 +538,44 @@ Reason: [brief explanation]`;
      */
     async _handleDirectResponse(userPrompt, chatMessages) {
         let finalPrompt = userPrompt;
-        // Check for analysis requests like "review file.js"
+        let fileReadSuccess = false;
+
+        // Tier 1: Attempt to read the file directly if it's an analysis request.
         if (this._isFileAnalysisRequest(userPrompt)) {
             const filePath = this._extractFilePath(userPrompt);
             if (filePath) {
                 try {
-                    // Use the file system tool to read the file content
                     const fileContent = await FileSystem.readFile(this.rootDirectoryHandle, filePath);
-                    // Enhance the prompt with the file content for the AI to analyze
                     finalPrompt = `File: \`${filePath}\`\n\`\`\`\n${fileContent}\n\`\`\`\n\n**User Request:** ${userPrompt}`;
-                    console.log(`[Direct Response] Injected content of ${filePath} for analysis.`);
+                    fileReadSuccess = true;
+                    console.log(`[Direct Response] Successfully injected content of ${filePath} for analysis.`);
                 } catch (error) {
-                    console.warn(`[Direct Response] Could not read file ${filePath} for analysis.`, error);
-                    UI.showError(`Could not read file "${filePath}" for review.`);
-                    // Proceed with original prompt if file read fails
+                    console.warn(`[Direct Response] Could not read file "${filePath}" directly. Falling back to AI tool usage.`);
+                    // Do not show an error to the user, let the AI handle it.
                 }
             }
         }
 
         this.currentHistory.push({ role: 'user', parts: [{ text: finalPrompt }] });
-        // For direct analysis, we've already gathered context (the file).
-        // Now, we want a direct answer from the AI without it trying to use more tools.
-        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: true, useTools: false });
+
+        // Tier 2: Call the AI with the appropriate tool permissions.
+        if (fileReadSuccess) {
+            // If we successfully read the file, the AI doesn't need tools. It just needs to analyze.
+            await this._performApiCall(this.currentHistory, chatMessages, {
+                singleTurn: true,
+                useTools: false, // Content is already provided
+                directAnalysis: true
+            });
+        } else {
+            // If we couldn't read the file, let the AI use tools. This is NOT a single turn,
+            // as the AI needs one turn to call the tool and a second turn to analyze the result.
+            await this._performApiCall(this.currentHistory, chatMessages, {
+                singleTurn: false,
+                useTools: true,
+                directAnalysis: true
+            });
+        }
+
         await DbManager.saveChatHistory(this.currentHistory);
     },
 
