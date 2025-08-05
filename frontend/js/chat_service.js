@@ -244,7 +244,9 @@ export const ChatService = {
         };
     },
 
-    async _performApiCall(history, chatMessages, singleTurn = false) {
+    async _performApiCall(history, chatMessages, options = {}) {
+        const { singleTurn = false, useTools = true } = options;
+
         if (!this.llmService) {
             UI.showError("LLM Service is not initialized. Please check your settings.");
             return;
@@ -269,33 +271,25 @@ export const ChatService = {
                 const customRules = Settings.get(`custom.${mode}.rules`);
                 
                 // Enhanced tool definitions with smart recommendations
-                let tools = ToolExecutor.getToolDefinitions();
+                let tools = useTools ? ToolExecutor.getToolDefinitions() : [];
                 
-                // Optimize tool selection for amend mode
-                if (mode === 'amend') {
-                    // Prioritize safer tools for amend mode
-                    const amendOptimizedTools = tools.functionDeclarations.map(tool => {
-                        if (tool.name === 'apply_diff') {
-                            return {
-                                ...tool,
-                                description: `🔧 RECOMMENDED FOR AMEND MODE: ${tool.description}`
-                            };
-                        }
-                        if (tool.name === 'read_file') {
-                            return {
-                                ...tool,
-                                description: `📖 ESSENTIAL FOR AMEND MODE: ${tool.description} Always use with include_line_numbers=true for precise editing.`
-                            };
-                        }
-                        if (tool.name === 'search_in_file') {
-                            return {
-                                ...tool,
-                                description: `🔍 PREFERRED FOR AMEND MODE: ${tool.description}`
-                            };
-                        }
-                        return tool;
-                    });
-                    tools = { functionDeclarations: amendOptimizedTools };
+                if (useTools) {
+                    // Optimize tool selection for amend mode
+                    if (mode === 'amend') {
+                        const amendOptimizedTools = tools.functionDeclarations.map(tool => {
+                            if (tool.name === 'apply_diff') {
+                                return { ...tool, description: `🔧 RECOMMENDED FOR AMEND MODE: ${tool.description}` };
+                            }
+                            if (tool.name === 'read_file') {
+                                return { ...tool, description: `📖 ESSENTIAL FOR AMEND MODE: ${tool.description} Always use with include_line_numbers=true for precise editing.` };
+                            }
+                            if (tool.name === 'search_in_file') {
+                                return { ...tool, description: `🔍 PREFERRED FOR AMEND MODE: ${tool.description}` };
+                            }
+                            return tool;
+                        });
+                        tools = { functionDeclarations: amendOptimizedTools };
+                    }
                 }
                 
                 const stream = this.llmService.sendMessageStream(history, tools, customRules);
@@ -489,17 +483,32 @@ export const ChatService = {
      */
     async _classifyMessageIntent(userPrompt, conversationContext = '') {
         const classificationPrompt = `
-Conversation context:
+Analyze the user's message and classify its primary intent into ONE of the following categories.
+
+**Conversation Context:**
 ${conversationContext}
 
-User message: "${userPrompt}"
+**User Message:** "${userPrompt}"
 
-Classify this message into ONE category:
-- DIRECT: Simple questions, explanations, greetings, thanks, casual conversation.
-- TASK: Complex work requiring multiple steps, project-level changes, "create/build/implement" requests.
-- TOOL: Specific actions needing tools but not full task management (e.g., "read file.js").
+---
+**Classification Categories & Rules:**
 
-Consider complexity, intent, and whether it needs breakdown into subtasks.
+1.  **DIRECT**: The user wants the AI to analyze, explain, review, or answer something. The primary action is AI thought, which may require using tools to gather information first.
+    *   **Examples**: "review file.js", "explain this code", "what does this function do?", "how does this work?", "fix this error"
+    *   **Keywords**: review, explain, what, how, why, fix, analyze
+
+2.  **TOOL**: The user wants to directly execute a specific tool and see the raw output. The primary action is running a tool, not AI analysis.
+    *   **Examples**: "read file.js", "list all files in src/", "search for 'API_KEY'", "get_project_structure"
+    *   **Keywords**: read, list, search, get, run tool
+
+3.  **TASK**: The user wants to perform a complex, multi-step operation that requires planning and execution of several actions.
+    *   **Examples**: "create a login system", "refactor the database module", "implement user authentication", "build a new component"
+    *   **Keywords**: create, build, implement, refactor, design, develop, system, feature
+
+---
+**Your Response:**
+
+Provide the classification and a brief reason.
 
 Response format: DIRECT|TASK|TOOL
 Reason: [brief explanation]`;
@@ -528,9 +537,53 @@ Reason: [brief explanation]`;
      * @param {HTMLElement} chatMessages - The chat messages container.
      */
     async _handleDirectResponse(userPrompt, chatMessages) {
-        this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
-        await this._performApiCall(this.currentHistory, chatMessages, true); // singleTurn = true
+        let finalPrompt = userPrompt;
+        // Check for analysis requests like "review file.js"
+        if (this._isFileAnalysisRequest(userPrompt)) {
+            const filePath = this._extractFilePath(userPrompt);
+            if (filePath) {
+                try {
+                    // Use the file system tool to read the file content
+                    const fileContent = await FileSystem.readFile(this.rootDirectoryHandle, filePath);
+                    // Enhance the prompt with the file content for the AI to analyze
+                    finalPrompt = `File: \`${filePath}\`\n\`\`\`\n${fileContent}\n\`\`\`\n\n**User Request:** ${userPrompt}`;
+                    console.log(`[Direct Response] Injected content of ${filePath} for analysis.`);
+                } catch (error) {
+                    console.warn(`[Direct Response] Could not read file ${filePath} for analysis.`, error);
+                    UI.showError(`Could not read file "${filePath}" for review.`);
+                    // Proceed with original prompt if file read fails
+                }
+            }
+        }
+
+        this.currentHistory.push({ role: 'user', parts: [{ text: finalPrompt }] });
+        // For direct analysis, we've already gathered context (the file).
+        // Now, we want a direct answer from the AI without it trying to use more tools.
+        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: true, useTools: false });
         await DbManager.saveChatHistory(this.currentHistory);
+    },
+
+    /**
+     * Checks if the user's prompt is a request to analyze a file.
+     * @param {string} userPrompt
+     * @returns {boolean}
+     */
+    _isFileAnalysisRequest(userPrompt) {
+        const keywords = ['review', 'explain', 'analyze', 'fix', 'debug'];
+        const lowerCasePrompt = userPrompt.toLowerCase();
+        return keywords.some(kw => lowerCasePrompt.startsWith(kw));
+    },
+
+    /**
+     * Extracts a file path from a user prompt.
+     * @param {string} userPrompt
+     * @returns {string|null}
+     */
+    _extractFilePath(userPrompt) {
+        // Matches file paths with various characters, including dots, slashes, and extensions.
+        const pathRegex = /([a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9_]+)/;
+        const match = userPrompt.match(pathRegex);
+        return match ? match[0] : null;
     },
 
     /**
@@ -539,9 +592,50 @@ Reason: [brief explanation]`;
      * @param {HTMLElement} chatMessages - The chat messages container.
      */
     async _handleToolExecution(userPrompt, chatMessages) {
-        // For now, treat as a direct response. Can be enhanced later to parse and run tools.
-        UI.appendMessage(chatMessages, "Tool execution pathway triggered. For now, treating as a direct question.", 'ai-muted');
-        await this._handleDirectResponse(userPrompt, chatMessages);
+        const toolRequest = this._parseToolRequest(userPrompt);
+
+        if (toolRequest) {
+            UI.appendMessage(chatMessages, `Executing tool: \`${toolRequest.toolName}\`...`, 'ai-muted');
+            await this.runToolDirectly(toolRequest.toolName, toolRequest.params);
+        } else {
+            // Fallback if no specific tool command is parsed
+            UI.appendMessage(chatMessages, "Could not parse a specific tool command. Treating as a direct question.", 'ai-muted');
+            await this._handleDirectResponse(userPrompt, chatMessages);
+        }
+    },
+
+    /**
+     * Parses a user prompt to find a specific tool command.
+     * @param {string} userPrompt
+     * @returns {{toolName: string, params: object}|null}
+     */
+    _parseToolRequest(userPrompt) {
+        const lowerCasePrompt = userPrompt.toLowerCase().trim();
+
+        // Pattern: "read <file_path>"
+        let match = lowerCasePrompt.match(/^read\s+(.+)/);
+        if (match) {
+            return { toolName: 'read_file', params: { path: match[1].trim() } };
+        }
+
+        // Pattern: "list files in <directory_path>" or "list files"
+        match = lowerCasePrompt.match(/^list\s+files(?:\s+in\s+(.+))?/);
+        if (match) {
+            return { toolName: 'list_files', params: { path: match[1] ? match[1].trim() : '.' } };
+        }
+
+        // Pattern: "search for '<query>'"
+        match = lowerCasePrompt.match(/^search\s+for\s+['"](.+)['"]/);
+        if (match) {
+            return { toolName: 'search_files', params: { query: match[1].trim() } };
+        }
+        
+        // Pattern: "get_project_structure"
+        if (lowerCasePrompt === 'get_project_structure') {
+            return { toolName: 'get_project_structure', params: {} };
+        }
+
+        return null; // No specific tool command found
     },
 
     /**
@@ -559,7 +653,7 @@ Reason: [brief explanation]`;
         this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
         this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
 
-        await this._performApiCall(this.currentHistory, chatMessages, true); // Force breakdown
+        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: true }); // Force breakdown
 
         let nextTask = taskManager.getNextTask();
         let executionAttempts = 0;
@@ -580,7 +674,7 @@ Execute this task step by step. When completed, call the task_update tool to mar
             let executionResult = null;
             try {
                 const startTime = Date.now();
-                await this._performApiCall(this.currentHistory, chatMessages, false);
+                await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: false });
                 const endTime = Date.now();
                 const updatedTask = taskManager.tasks.get(nextTask.id);
                 if (updatedTask && updatedTask.status === 'in_progress') {
@@ -661,7 +755,7 @@ Execute this task step by step. When completed, call the task_update tool to mar
             const history = await DbManager.getChatHistory();
             history.push({ role: 'user', parts: [{ text: prompt }] });
 
-            await this._performApiCall(history, chatMessages, true); // singleTurn = true
+            await this._performApiCall(history, chatMessages, { singleTurn: true });
 
             await DbManager.saveChatHistory(history);
         } catch (error) {
