@@ -1501,7 +1501,7 @@ async function _taskCreate({ title, description = '', priority = 'medium', paren
 
 async function _taskUpdate({ taskId, updates }) {
     if (!taskId || !updates) {
-        throw new Error("The 'task_update' tool requires both a 'taskId' (string) and an 'updates' (object) parameter. Please provide both in your next tool call.");
+        throw new Error("The 'task_update' tool is missing required parameters. You MUST provide both a 'taskId' (string) and an 'updates' (object). For example: { taskId: 'task_123', updates: { status: 'in_progress', notes: 'Started working on the task.' } }");
     }
     if (typeof taskId !== 'string') throw new Error("The 'taskId' parameter must be a string.");
     if (typeof updates !== 'object' || updates === null) throw new Error("The 'updates' parameter must be an object.");
@@ -3938,7 +3938,7 @@ export function getToolDefinitions() {
             
             // --- Unified Task Management System ---
             { name: 'task_create', description: "Creates a new task. This is the starting point for any new goal.", parameters: { type: 'OBJECT', properties: { title: { type: 'STRING' }, description: { type: 'STRING' }, priority: { type: 'STRING', enum: ['low', 'medium', 'high', 'urgent'] }, parentId: { type: 'STRING' }, listId: { type: 'STRING' } }, required: ['title'] } },
-            { name: 'task_update', description: "🔄 Updates an existing task with new information or status. MANDATORY: Both 'taskId' (string) and 'updates' (object) parameters are REQUIRED. The updates object must contain at least one property like {status: 'completed', notes: 'Task finished successfully'}.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING', description: 'REQUIRED: The ID of the task to update' }, updates: { type: 'OBJECT', description: 'REQUIRED: Object containing the updates to apply (e.g., {status: "completed", progress: 100})' } }, required: ['taskId', 'updates'] } },
+            { name: 'task_update', description: "🔄 Updates an existing task. CRITICAL: You MUST provide both 'taskId' and 'updates'. The 'updates' object MUST contain the properties to be changed. For example, to mark a task as complete, the tool call would be: `task_update({ taskId: 'task_123', updates: { status: 'completed' } })`.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING', description: "REQUIRED: The ID of the task to update (e.g., 'task_123')" }, updates: { type: 'OBJECT', description: "REQUIRED: An object with the fields to update (e.g., { status: 'completed', progress: 100 })" } }, required: ['taskId', 'updates'] } },
             { name: 'task_delete', description: "Deletes a task and all of its subtasks.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING' } }, required: ['taskId'] } },
             { name: 'task_breakdown', description: "🎯 CRITICAL: Analyzes a high-level task and breaks it down into SPECIFIC, ACTIONABLE subtasks. DO NOT create generic tasks like 'Analyze requirements' or 'Plan approach'. Instead, create concrete tasks like 'Locate CSS files containing dashboard styles', 'Identify color variables in style.css', 'Update background-color properties to blue theme'. Each subtask should be a specific action that can be executed immediately.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING' } }, required: ['taskId'] } },
             { name: 'task_get_next', description: "Fetches the next logical task for the AI to work on, based on priority and dependencies." },
