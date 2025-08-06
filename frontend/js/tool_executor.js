@@ -586,22 +586,32 @@ async function _readFileLines({ filename, start_line, end_line }, rootHandle) {
             console.warn(`Warning: File content for ${filename} is not a string, it is a ${typeof streamResult.content}.`);
             console.warn(`Strategy used: ${streamResult.strategy}, Content truncated: ${streamResult.truncated}`);
             
-            // Try to convert to string or use empty string as fallback
-            content = streamResult.content ? String(streamResult.content) : '';
+            // Fix: Properly handle non-string content by converting to string or using empty fallback
+            if (streamResult.content === null || streamResult.content === undefined) {
+                content = '';
+            } else if (typeof streamResult.content === 'object') {
+                // If it's an object, try to extract text content or stringify as last resort
+                content = streamResult.content.text || streamResult.content.content || JSON.stringify(streamResult.content);
+            } else {
+                // For other types, convert to string
+                content = String(streamResult.content);
+            }
             console.log(`Converted content to string (length: ${content.length})`);
-            
-            lines = content.split('\n');
-            console.log(`Split content into ${lines.length} lines`);
-            
-            clampedStart = Math.max(1, start_line);
-            clampedEnd = Math.min(lines.length, end_line);
         } else {
             content = streamResult.content;
-            lines = content.split('\n');
-            
-            clampedStart = Math.max(1, start_line);
-            clampedEnd = Math.min(lines.length, end_line);
         }
+        
+        // Ensure content is definitely a string before splitting
+        if (typeof content !== 'string') {
+            console.error(`Content is still not a string after conversion: ${typeof content}`);
+            content = '';
+        }
+        
+        lines = content.split('\n');
+        console.log(`Split content into ${lines.length} lines`);
+        
+        clampedStart = Math.max(1, start_line);
+        clampedEnd = Math.min(lines.length, end_line);
     } catch (error) {
         console.error(`Error reading file ${filename}:`, error);
         throw new Error(`Failed to read file ${filename}: ${error.message}`);
