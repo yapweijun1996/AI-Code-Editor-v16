@@ -14,5 +14,13 @@
     ".value0",
     ".value2",
     ".value4"
+  ],
+  "frontend\\js\\tool_executor.js": [
+    "trackToolPerformance",
+    "getOptimalTool",
+    "analyzeError",
+    "getSuggestedFix",
+    "getCachedResult",
+    "setCachedResult"
   ]
 }
