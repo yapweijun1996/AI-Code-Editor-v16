@@ -279,6 +279,7 @@ body.resizing {
   color: var(--chat-user-text);
   align-self: flex-end;
   border-bottom-right-radius: 0.25rem;
+  white-space: pre-line;
 }
 
 .chat-message.ai {
