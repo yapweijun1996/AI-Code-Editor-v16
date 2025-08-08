@@ -83,6 +83,7 @@ export class GeminiService extends BaseLLMService {
                 }
 
                 // If we get here, the request was successful
+                this.apiKeyManager.rotateKey(); // Advance to next key for the next request (round-robin)
                 return;
 
             } catch (error) {

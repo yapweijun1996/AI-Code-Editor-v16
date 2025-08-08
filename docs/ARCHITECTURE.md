@@ -120,18 +120,34 @@ classDiagram
 
 ### API Key Rotation (Gemini Only)
 
-Gemini service implements automatic API key rotation to handle rate limits:
+Gemini service implements a round-robin API key rotation policy with:
+- Rotation on retryable errors within the same request
+- Automatic advance to the next key after a successful request
+- Index persistence across requests (the next request starts from the next key)
+
+Implementation references:
+- Rotation loop and success-advance: [`GeminiService.sendMessageStream()`](../frontend/js/llm/gemini_service.js:18)
+- Retryable error detection: [`GeminiService._isRetryableError()`](../frontend/js/llm/gemini_service.js:118)
+- Index persistence across requests: [`ApiKeyManager.loadKeys()`](../frontend/js/api_manager.js:10)
+- Rotation primitive: [`ApiKeyManager.rotateKey()`](../frontend/js/api_manager.js:64)
 
 ```mermaid
 flowchart TD
-    A[API Request] --> B{Try Current Key}
-    B -->|Success| C[Return Response]
-    B -->|Rate Limit/Auth Error| D{More Keys Available?}
-    D -->|Yes| E[Rotate to Next Key]
-    E --> F[Retry Request]
-    F --> B
-    D -->|No| G[Throw Final Error]
+    A[Start Request] --> B[ApiKeyManager.loadKeys<br/>(preserve index)]
+    B --> C[resetTriedKeys]
+    C --> D{Try Current Key}
+    D -->|Success| E[rotateKey once<br/>for NEXT request]
+    E --> F[Return Response]
+    D -->|Retryable Error<br/>(429/401/403/503/network/stream)| G{Untried Keys Left?}
+    G -->|Yes| H[rotateKey and Retry]
+    H --> D
+    G -->|No| I[Throw Final Error]
 ```
+
+Notes:
+- Success path rotates once so the next request continues round-robin.
+- With a single key, rotation is a no-op by design.
+- Duplicate keys reduce the usefulness of “all keys tried”; prefer unique keys per line.
 
 ## End-to-End Workflow
 

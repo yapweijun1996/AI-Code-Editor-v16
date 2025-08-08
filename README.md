@@ -227,6 +227,60 @@ The management scripts also provide options to **stop**, **restart**, and **moni
     *   Select a local directory to work with - the application will remember this folder for future sessions
 
 ---
+ 
+## Gemini API Key Rotation Policy
+
+This project implements a round-robin Gemini API key rotation system with both success-advance and error-retry semantics.
+
+- Input multiple Gemini API keys separated by new lines in LLM Settings.
+- The system preserves your current key index across requests.
+- After each successful request, the index advances to the next key automatically.
+- On retryable errors (rate limits, auth issues, network/timeout, 503/overload, stream/parse errors), the system rotates to the next key and retries until:
+  - success (then it still advances), or
+  - all keys have been tried in this request (throws the last error)
+
+Implementation references:
+- Rotation logic lives in [`GeminiService.sendMessageStream()`](frontend/js/llm/gemini_service.js:18)
+- Success-advance occurs here: [`GeminiService.sendMessageStream()`](frontend/js/llm/gemini_service.js:85)
+- Retryable error detection: [`GeminiService._isRetryableError()`](frontend/js/llm/gemini_service.js:118)
+- Index persistence across requests: [`ApiKeyManager.loadKeys()`](frontend/js/api_manager.js:10)
+- Rotation primitive: [`ApiKeyManager.rotateKey()`](frontend/js/api_manager.js:64)
+
+Mermaid overview (per-request behavior):
+```mermaid
+flowchart TD
+  A[Start request] --> B[ApiKeyManager.loadKeys\n(preserve index)]
+  B --> C[resetTriedKeys]
+  C --> D{Try current key}
+  D -->|success| E[rotateKey once\nfor next request]
+  E --> F[return]
+  D -->|retryable error| G[rotateKey and retry]
+  G --> D
+  D -->|non-retryable or all keys tried| H[throw error]
+```
+
+Mermaid overview (cross-request round-robin):
+```mermaid
+sequenceDiagram
+  participant R1 as Request #1
+  participant R2 as Request #2
+  participant R3 as Request #3
+
+  R1->>R1: Use key K
+  alt success
+    R1->>R1: rotate to K+1 (post-success)
+  else retryable error
+    R1->>R1: rotate until success or keys exhausted
+    R1->>R1: on success, rotate once more
+  end
+
+  R2->>R2: Starts at next index from R1
+  R3->>R3: Starts at next index from R2
+```
+
+Notes:
+- With a single key, rotation is a no-op by design and behavior remains correct.
+- Duplicate keys are allowed but reduce the usefulness of “all keys tried” checks; prefer unique keys per line.
 
 ## For Developers
 
