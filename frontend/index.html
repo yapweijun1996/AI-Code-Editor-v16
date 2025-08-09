@@ -72,12 +72,19 @@
           </div>
           <div class="header-toolbar">
             <button id="settings-toggle-button" title="Toggle Settings">⚙️</button>
+            <label class="toolbar-group" title="Enable LLM debug and health panel">
+              <input type="checkbox" id="debug-llm-toggle" />
+              Debug
+            </label>
             <div class="toolbar-group" id="token-usage-display" style="display: flex;">
               <span id="token-request">Req: 0</span>
               <span id="token-response">Res: 0</span>
               <span id="token-total">Total: 0</span>
             </div>
           </div>
+        </div>
+        <div id="llm-health-panel" class="llm-health-panel" style="display: none;">
+          <pre id="llm-health-json" style="margin:0;"></pre>
         </div>
         <div id="chat-messages"></div>
         <div id="chat-input-container">

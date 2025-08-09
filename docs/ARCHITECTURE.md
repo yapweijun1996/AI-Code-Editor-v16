@@ -283,3 +283,60 @@ flowchart TD
 This architecture ensures that the diffing process is both fast and memory-efficient, making the AI agent's file modification capabilities robust and scalable.
 
 ---
+## LLM Observability, Health Metrics, and Debug Panel
+
+To improve reliability and debuggability across providers, we added first-class observability and a lightweight circuit breaker.
+
+### Provider Health Metrics (BaseLLMService)
+- Location: frontend/js/llm/base_llm_service.js
+- Method: getHealthStatus()
+- Reported fields:
+  - provider, model
+  - isHealthy
+  - requestCount, successfulRequests, failedRequests
+  - successRate (rolling percentage)
+  - averageResponseTime (ms)
+  - lastError (message only, no sensitive data)
+  - configuration (sanitized config details)
+
+These metrics are updated automatically by the centralized send/stream entrypoint (sendMessageStream()), so all providers report consistent telemetry without duplicating logic.
+
+### Centralized Retry, Backoff, and Key Rotation
+- Location: frontend/js/llm/base_llm_service.js, frontend/js/llm/retry_policy.js, frontend/js/llm/key_rotation.js, frontend/js/llm/error_policy.js
+- Features:
+  - Standard error classification and retryability decisions
+  - Exponential backoff with jitter
+  - Request-scoped API key rotation on retryable failures
+  - Rotate-on-success to maintain fair round-robin distribution across keys
+  - Abort-aware early exits
+
+Enable verbose diagnostics via Settings:
+- Key: llm.common.debugLLM (default: false)
+- When enabled, BaseLLMService logs key retry/rotation attempts, backoff delays, and request lifecycle events.
+
+### Simple Circuit Breaker
+- Location: frontend/js/llm/base_llm_service.js (within sendMessageStream())
+- Behavior:
+  - Trips to “open” after repeated failures (configurable thresholds)
+  - Enters cooldown before accepting new requests
+  - Uses a “half-open” probe to test recovery and auto-close on success
+
+This protects the UI from spamming a failing provider/key set and provides clear signals in the debug panel.
+
+### In-App Debug Panel
+- Markup: frontend/index.html (Chat header → bug icon + slide-in panel)
+- Logic: frontend/js/main.js (wires UI controls), frontend/js/chat_service.js (data source)
+- Data Provider: ChatService.getLLMDebugInfo() exposes:
+  - Provider and model
+  - Current API key index (masked current key preview), and “tried all keys” state
+  - isHealthy and full getHealthStatus() snapshot
+
+What you’ll see in the panel:
+- Real-time health metrics for the active provider
+- Key rotation index and state (never shows full secret)
+- Buttons to refresh the snapshot and (optionally) reset metrics
+
+Notes:
+- The panel is read-only with respect to secrets; keys are never printed. A short masked preview (e.g., sk-12..9Z) is used to indicate which key is active.
+- Toggle debug logs globally via Settings.get('llm.common.debugLLM').
+- The panel auto-refresh interval and controls wiring live in main.js.

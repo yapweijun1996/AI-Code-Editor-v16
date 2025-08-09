@@ -282,6 +282,81 @@ Notes:
 - With a single key, rotation is a no-op by design and behavior remains correct.
 - Duplicate keys are allowed but reduce the usefulness of “all keys tried” checks; prefer unique keys per line.
 
+## LLM Architecture, Reliability, and Test Harness
+
+This project includes a provider-agnostic LLM layer with unified reliability controls, token usage display, and built-in test harnesses.
+
+### Provider-Agnostic Facade
+- LLMFacade composes:
+  - PromptBuilder: builds a single, consistent system prompt per mode.
+  - ToolAdapter: converts internal tool definitions to each provider’s schema and normalizes tool-call responses.
+  - BaseLLMService: central entry point handling retries, key rotation, circuit breaker, rate limits, and health metrics.
+
+### Unified Reliability Controls (BaseLLMService)
+- Exponential backoff with jitter for retryable errors (rate limit, network, transient server/streaming issues).
+- Circuit breaker with CLOSED → OPEN → HALF_OPEN transitions and cooldown.
+- Rate limit gate per requestsPerMinute; rolling windows for success/latency/error metrics.
+- Request-scoped key rotation session:
+  - Rotates on retryable error before next attempt.
+  - Optional rotate-on-success to maintain cross-request round-robin.
+- Health status API for UI/observability:
+  - breaker state, failure counts, rolling success rate, average latency, recent errors.
+
+### Token Usage Normalization
+- Live token usage display in the chat header shows Request, Response, and Total.
+- Usage sources:
+  - Gemini: usageMetadata streamed per chunk (promptTokenCount, candidatesTokenCount).
+  - Ollama: prompt_eval_count and eval_count on final chunk.
+  - OpenAI (SSE): usage not consistently present in stream; we estimate response tokens from streamed text as a fallback.
+- See ChatService for the normalization path and UI.updateTokenDisplay integration.
+
+### Streaming Cancellation
+- All providers support cancellation via AbortController.
+- UI “Cancel” button stops the current stream cleanly.
+- Console test suite: runCancelSuite and runCancelSmokeTest validate cancellation behavior.
+
+### LLM Debug Panel and Health Modal
+- Toggle “Debug” in the chat header to show a small live health panel.
+- Click “LLM Debug” to open a modal with:
+  - Live JSON status (provider, model, breaker state, rolling metrics, API key index).
+  - Controls: Trip OPEN (force breaker), Reset (close breaker), Fail Once (inject synthetic error), Mark Success (inject synthetic success).
+- Useful for verifying health/incident UX and breaker behavior without real failures.
+
+### Console Test Runners (Parity, Chaos, Cancellation, Prompts)
+Open DevTools Console and use:
+- window.runLLMSmoke() — quick provider smoke.
+- window.LLMTest.runToolParitySuite() — validate end-to-end tool-calling parity.
+- window.runLLMToolParity() — alias for parity suite.
+- window.LLMTest.runChaosSuite() / window.runLLMChaos() — retry/backoff/key-rotation chaos tests.
+- window.LLMTest.runRetryChaosTest({ failures: 2, type: 'rate_limit' }) — parameterized chaos test.
+- window.LLMTest.runCancelSuite() / window.runLLMCancel() — cancellation suite.
+- window.LLMTest.runCancelSmokeTest() — lightweight cancellation check.
+- window.LLMTest.runPromptSmokeTest() — system prompt sanity checks.
+- window.LLMTest.runHealthSmokeTest() — health/metrics smoke.
+
+### Provider Notes
+- Gemini
+  - Uses systemInstruction, native tools, and sendMessageStream with chunk.text(), chunk.functionCalls(), chunk.usageMetadata.
+  - Robust handling for transient streaming/parse errors.
+- OpenAI
+  - chat/completions SSE with tools and tool_choice; aggregates tool_calls across chunks.
+  - Usage often not present in SSE; fallback estimation handled in ChatService.
+- Ollama
+  - Local /api/chat streaming; emits prompt_eval_count and eval_count at completion.
+
+### Settings and Tuning
+- Common knobs (Settings):
+  - llm.common.debugLLM, timeoutMs, retryAttempts, retryDelay, requestsPerMinute, tokensPerMinute.
+- Per-provider tuning:
+  - Temperature, topP, max tokens, tool enabling and tool-call mode (where applicable).
+- Live reconfiguration: changes in settings hot-reload the LLM service and refresh the debug panel.
+
+### How To Use
+1) Configure provider and models via the chat header Settings panel.
+2) Optionally enable Debug to watch health JSON live.
+3) Use the console runners for parity/chaos/cancellation validation.
+4) During failures, open the LLM Debug modal to inspect breaker state, recent errors, and rotate/reset behavior.
+
 ## For Developers
 
 Interested in contributing? We welcome your help!

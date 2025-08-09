@@ -4,9 +4,11 @@ import { BaseLLMService } from './base_llm_service.js';
  * Concrete implementation for a local Ollama instance.
  */
 export class OllamaService extends BaseLLMService {
-    constructor(apiKeyManager, model, customConfig = {}) {
-        super(null, model);
+    constructor(apiKeyManager, model, customConfig = {}, providerConfig = {}, options = {}) {
+        // Ollama does not use ApiKeyManager; pass null but carry over common options
+        super(null, model, options);
         this.customConfig = customConfig;
+        this.updateConfig(providerConfig);
     }
 
     async isConfigured() {
@@ -22,7 +24,8 @@ export class OllamaService extends BaseLLMService {
 
         const controller = new AbortController();
         const abortHandler = () => controller.abort();
-        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
+        const timeoutMs = this.options?.timeout ?? 300000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs); // configurable timeout
         if (abortSignal) {
             if (abortSignal.aborted) {
                 clearTimeout(timeoutId);
@@ -42,6 +45,11 @@ export class OllamaService extends BaseLLMService {
                     model: this.model,
                     messages: messages,
                     stream: true,
+                    options: {
+                        temperature: this.providerConfig?.temperature,
+                        top_p: this.providerConfig?.topP,
+                        num_predict: this.providerConfig?.maxTokens
+                    }
                     // Note: Ollama's native tool support is still developing.
                     // This implementation will focus on text generation for now.
                 }),

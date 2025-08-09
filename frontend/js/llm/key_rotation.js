@@ -30,10 +30,11 @@ export class KeyRotationSession {
    * @param {object} apiKeyManager
    * @param {{ rotateOnSuccess?: boolean }} options
    */
-  constructor(apiKeyManager, { rotateOnSuccess = false } = {}) {
+  constructor(apiKeyManager, { rotateOnSuccess = false, debug = false } = {}) {
     this.mgr = apiKeyManager;
     this.startIndex = typeof apiKeyManager.currentIndex === 'number' ? apiKeyManager.currentIndex : 0;
     this.rotateOnSuccess = !!rotateOnSuccess;
+    this.debug = !!debug;
     this.rotationsDuringRetries = 0;
   }
 
@@ -44,7 +45,10 @@ export class KeyRotationSession {
    */
   onBeforeAttempt(attempt) {
     if (attempt > 1) {
+      if (this.debug) this._log(`onBeforeAttempt: attempt ${attempt} > 1, rotating key (currentIndex=${this.mgr?.currentIndex ?? 'n/a'})`);
       this._rotate();
+    } else {
+      if (this.debug) this._log(`onBeforeAttempt: initial attempt ${attempt}, no rotation`);
     }
   }
 
@@ -54,6 +58,7 @@ export class KeyRotationSession {
    * at the next attempt, avoid double-rotating (choose one).
    */
   onRetryableError() {
+    if (this.debug) this._log(`onRetryableError: rotating key (currentIndex=${this.mgr?.currentIndex ?? 'n/a'})`);
     this._rotate();
   }
 
@@ -64,7 +69,10 @@ export class KeyRotationSession {
    */
   onSuccess() {
     if (this.rotateOnSuccess) {
+      if (this.debug) this._log(`onSuccess: rotating key (currentIndex=${this.mgr?.currentIndex ?? 'n/a'})`);
       this._rotate();
+    } else {
+      if (this.debug) this._log('onSuccess: rotateOnSuccess disabled, no rotation');
     }
   }
 
@@ -80,10 +88,21 @@ export class KeyRotationSession {
     if (this.mgr.resetTriedKeys) this.mgr.resetTriedKeys();
   }
 
+  _log(msg) {
+    try {
+      console.info(`[KeyRotation] ${msg}`);
+    } catch (_) {}
+  }
+
   _rotate() {
     if (this.mgr && typeof this.mgr.rotateKey === 'function') {
+      const before = typeof this.mgr.currentIndex === 'number' ? this.mgr.currentIndex : 'n/a';
       this.mgr.rotateKey();
+      const after = typeof this.mgr.currentIndex === 'number' ? this.mgr.currentIndex : 'n/a';
       this.rotationsDuringRetries++;
+      if (this.debug) this._log(`rotate: index ${before} -> ${after} (total retry-rotations=${this.rotationsDuringRetries})`);
+    } else {
+      if (this.debug) this._log('rotate: manager missing or rotateKey not a function');
     }
   }
 }

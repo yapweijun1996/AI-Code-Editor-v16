@@ -13,11 +13,16 @@ import { contextAnalyzer } from './context_analyzer.js';
 import { contextBuilder } from './context_builder.js';
 import { PromptBuilder } from './llm/prompt_builder.js';
 import { ToolAdapter } from './llm/tool_adapter.js';
+import { LLMFacade } from './llm/llm_facade.js';
+import { IntentClassifier } from './llm/intent_classifier.js';
+import { TaskOrchestrator } from './llm/task_orchestrator.js';
 
 export const ChatService = {
     isSending: false,
     isCancelled: false,
+    currentAbortController: null,
     llmService: null,
+    llmFacade: null,
     rootDirectoryHandle: null,
     activePlan: null,
     errorTracker: {
@@ -42,6 +47,7 @@ export const ChatService = {
     async _initializeLLMService() {
         const llmSettings = Settings.getLLMSettings();
         this.llmService = LLMServiceFactory.create(llmSettings.provider, llmSettings);
+        this.llmFacade = new LLMFacade(this.llmService, llmSettings);
         
         // Initialize provider-specific optimizations
         this.currentProvider = llmSettings.provider;
@@ -49,8 +55,8 @@ export const ChatService = {
         
         // Sync provider capabilities with providerOptimizer (temporary alignment)
         try {
-            if (this.llmService?.getCapabilities) {
-                const caps = this.llmService.getCapabilities();
+            if (this.llmFacade?.getCapabilities || this.llmService?.getCapabilities) {
+                const caps = this.llmFacade?.getCapabilities ? this.llmFacade.getCapabilities() : this.llmService.getCapabilities();
                 const providerKey = caps?.provider || this.currentProvider;
                 const existing = providerOptimizer.providerLimits[providerKey] || {};
                 // Map BaseLLMService capabilities into providerOptimizer schema
@@ -274,6 +280,8 @@ export const ChatService = {
 
     async _performApiCall(history, chatMessages, options = {}) {
         const { singleTurn = false, useTools = true, directAnalysis = false } = options;
+        const controller = new AbortController();
+        this.currentAbortController = controller;
 
         if (!this.llmService) {
             UI.showError("LLM Service is not initialized. Please check your settings.");
@@ -284,6 +292,7 @@ export const ChatService = {
         let continueLoop = true;
         let totalRequestTokens = 0;
         let totalResponseTokens = 0;
+        let usageSeen = false;
 
         // Estimate request tokens
         if (typeof GPTTokenizer_cl100k_base !== 'undefined') {
@@ -322,10 +331,15 @@ export const ChatService = {
                     }
                 }
                 
-                const promptPack = PromptBuilder.build(mode, customRules);
-                const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
-                const effectiveHistory = [systemTurn, ...history];
-                const stream = this.llmService.sendMessageStream(effectiveHistory, tools, customRules);
+                let stream;
+                if (this.llmFacade) {
+                    stream = this.llmFacade.sendMessageStream(history, tools, mode, customRules, controller.signal);
+                } else {
+                    const promptPack = PromptBuilder.build(mode, customRules);
+                    const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
+                    const effectiveHistory = [systemTurn, ...history];
+                    stream = this.llmService.sendMessageStream(effectiveHistory, tools, customRules, controller.signal);
+                }
 
                 let modelResponseText = '';
                 let displayText = '';
@@ -352,16 +366,28 @@ export const ChatService = {
                         }
                     }
                     if (chunk.usageMetadata) {
-                        // This is for Gemini, which provides accurate counts
-                        totalRequestTokens = chunk.usageMetadata.promptTokenCount || 0;
-                        totalResponseTokens += chunk.usageMetadata.candidatesTokenCount || 0;
+                        // Normalized usage across providers:
+                        // - promptTokenCount: absolute (max across chunks)
+                        // - candidatesTokenCount: absolute (max across chunks)
+                        usageSeen = true;
+                        const pt = Number(chunk.usageMetadata.promptTokenCount || 0);
+                        const ct = Number(chunk.usageMetadata.candidatesTokenCount || 0);
+                        totalRequestTokens = Math.max(totalRequestTokens || 0, pt);
+                        totalResponseTokens = Math.max(totalResponseTokens || 0, ct);
                     }
                 }
 
-                // For OpenAI, estimate response tokens
-                if (typeof GPTTokenizer_cl100k_base !== 'undefined' && this.llmService.constructor.name === 'OpenAIService') {
-                    const { encode } = GPTTokenizer_cl100k_base;
-                    totalResponseTokens = encode(modelResponseText).length;
+                // If no provider usage was reported, estimate tokens as a fallback
+                if (!usageSeen && typeof GPTTokenizer_cl100k_base !== 'undefined') {
+                    try {
+                        const { encode } = GPTTokenizer_cl100k_base;
+                        // totalRequestTokens already estimated from input history earlier; ensure it's numeric
+                        totalRequestTokens = Number(totalRequestTokens || 0);
+                        // Estimate response tokens from streamed text
+                        totalResponseTokens = Number(encode(modelResponseText).length || 0);
+                    } catch (_) {
+                        // Leave totals as-is if tokenizer not available or estimation fails
+                    }
                 }
                 
                 console.log(`[Token Usage] Final totals - Req: ${totalRequestTokens}, Res: ${totalResponseTokens}`);
@@ -419,6 +445,9 @@ export const ChatService = {
             }
         }
 
+        // Reset abort controller reference
+        this.currentAbortController = null;
+
         // Only save to DB if it's not part of an autonomous plan
         if (!this.activePlan) {
             await DbManager.saveChatHistory(history);
@@ -445,17 +474,22 @@ export const ChatService = {
             const customRules = options.customRules || '';
 
             const mode = document.getElementById('agent-mode-selector')?.value || 'code';
-            const promptPack = PromptBuilder.build(mode, customRules);
-            const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
-
-            // Create a simple message history with system prompt
-            const messageHistory = [systemTurn, ...history, {
+            const abortSignal = options.abortSignal || null;
+            // Build message history without system; Facade will ensure system turn
+            const messageHistory = [...history, {
                 role: 'user',
                 parts: [{ text: prompt }]
             }];
 
             let fullResponse = '';
-            const streamGenerator = this.llmService.sendMessageStream(messageHistory, tools, customRules);
+            const streamGenerator = this.llmFacade
+                ? this.llmFacade.sendMessageStream(messageHistory, tools, mode, customRules, abortSignal)
+                : this.llmService.sendMessageStream(
+                    [{ role: 'system', parts: [{ text: PromptBuilder.build(mode, customRules).systemPrompt }] }, ...messageHistory],
+                    tools,
+                    customRules,
+                    abortSignal
+                  );
             
             for await (const chunk of streamGenerator) {
                 if (chunk.text) {
@@ -526,44 +560,21 @@ export const ChatService = {
 
     /**
      * Asks the AI to classify the user's intent to determine the correct handling logic.
+     * Delegates to IntentClassifier (single-turn, no tools) via LLMFacade.
      * @param {string} userPrompt - The user's message.
      * @param {string} conversationContext - Recent conversation history.
      * @returns {Promise<string>} The AI's classification (DIRECT, TASK, or TOOL).
      */
     async _classifyMessageIntent(userPrompt, conversationContext = '') {
-        const classificationPrompt = `
-Analyze the user's message and classify its primary intent into ONE of the following categories.
-
-**Conversation Context:**
-${conversationContext}
-
-**User Message:** "${userPrompt}"
-
----
-**Classification Categories & Rules:**
-
-1.  **DIRECT**: The user wants the AI to analyze, explain, review, or answer something. The primary action is AI thought, which may require using tools to gather information first.
-    *   **Examples**: "review file.js", "explain this code", "what does this function do?", "how does this work?", "fix this error"
-    *   **Keywords**: review, explain, what, how, why, fix, analyze
-
-2.  **TOOL**: The user wants to directly execute a specific tool and see the raw output. The primary action is running a tool, not AI analysis.
-    *   **Examples**: "read file.js", "list all files in src/", "search for 'API_KEY'", "get_project_structure"
-    *   **Keywords**: read, list, search, get, run tool
-
-3.  **TASK**: The user wants to perform a complex, multi-step operation that requires planning and execution of several actions.
-    *   **Examples**: "create a login system", "refactor the database module", "implement user authentication", "build a new component"
-    *   **Keywords**: create, build, implement, refactor, design, develop, system, feature
-
----
-**Your Response:**
-
-Provide the classification and a brief reason.
-
-Response format: DIRECT|TASK|TOOL
-Reason: [brief explanation]`;
-
-        // Use sendPrompt for a direct, non-chatty response
-        return await this.sendPrompt(classificationPrompt, { history: this.currentHistory });
+        const history = this.currentHistory || await DbManager.getChatHistory();
+        // Ensure we have a facade (created in _initializeLLMService)
+        const facade = this.llmFacade || new LLMFacade(this.llmService, Settings.getLLMSettings());
+        return await IntentClassifier.classify({
+            llmFacade: facade,
+            userPrompt,
+            conversationContext,
+            history
+        });
     },
 
     /**
@@ -705,106 +716,18 @@ Reason: [brief explanation]`;
 
     /**
      * Handles complex tasks that require breakdown and the full task management system.
-     * This function encapsulates the original, complex logic of `sendMessage`.
+     * Delegates to TaskOrchestrator to coordinate execution.
      * @param {string} userPrompt - The user's message.
      * @param {HTMLElement} chatMessages - The chat messages container.
      */
     async _handleTaskCreation(userPrompt, chatMessages) {
-        // This is the original, complex logic, now conditionally executed.
-        await taskManager.clearActiveTasks();
-        UI.appendMessage(chatMessages, `Task created: "${userPrompt}"`, 'ai');
-        const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
-
-        this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
-        this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
-
-        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: true }); // Force breakdown
-
-        let nextTask = taskManager.getNextTask();
-        let executionAttempts = 0;
-        const maxExecutionAttempts = 10;
-
-        while (nextTask && !this.isCancelled && executionAttempts < maxExecutionAttempts) {
-            executionAttempts++;
-            UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
-            await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
-
-            const contextInfo = this._buildTaskContext(nextTask);
-            const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
-Context: ${contextInfo}
-Execute this task step by step. When completed, call the task_update tool to mark it as completed. Task ID: ${nextTask.id}`;
-            
-            this.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
-
-            let executionResult = null;
-            try {
-                const startTime = Date.now();
-                await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: false });
-                const endTime = Date.now();
-                const updatedTask = taskManager.tasks.get(nextTask.id);
-                if (updatedTask && updatedTask.status === 'in_progress') {
-                    await taskManager.updateTask(nextTask.id, {
-                        status: 'completed',
-                        results: { completedAutomatically: true, timestamp: Date.now(), executionTime: endTime - startTime }
-                    });
-                    executionResult = { success: true, executionTime: endTime - startTime };
-                } else {
-                    executionResult = { success: updatedTask?.status === 'completed', status: updatedTask?.status, results: updatedTask?.results };
-                }
-            } catch (error) {
-                console.error(`[ChatService] Error executing task ${nextTask.id}:`, error);
-                const errorAnalysis = this._analyzeTaskError(nextTask, error);
-                executionResult = { error: error.message, timestamp: Date.now(), analysis: errorAnalysis };
-                if (errorAnalysis.canRecover && errorAnalysis.retryCount < 2) {
-                    UI.appendMessage(chatMessages, `Task "${nextTask.title}" encountered an error. Attempting recovery...`, 'ai');
-                    await taskManager.updateTask(nextTask.id, {
-                        status: 'pending',
-                        context: { ...nextTask.context, errorHistory: [...(nextTask.context?.errorHistory || []), { error: error.message, timestamp: Date.now(), retryCount: errorAnalysis.retryCount + 1 }] }
-                    });
-                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
-                } else {
-                    await taskManager.updateTask(nextTask.id, { status: 'failed', results: executionResult });
-                    UI.appendMessage(chatMessages, `Task "${nextTask.title}" failed after recovery attempts: ${error.message}`, 'ai');
-                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
-                }
-            }
-
-            if (executionResult && !executionResult.error) {
-                await taskManager.replanBasedOnResults(nextTask.id, executionResult);
-            }
-
-            nextTask = taskManager.getNextTask();
-            if (nextTask && nextTask.status === 'failed' && executionAttempts > 3) {
-                console.warn(`[ChatService] Breaking execution loop - repeated failed task: ${nextTask.title}`);
-                break;
-            }
-        }
-
-        if (executionAttempts >= maxExecutionAttempts) {
-            UI.appendMessage(chatMessages, 'Execution stopped: Maximum attempts reached.', 'ai');
-        }
-
-        if (this.isCancelled) {
-            UI.appendMessage(chatMessages, 'Execution cancelled by user.', 'ai');
-            await taskManager.updateTask(mainTask.id, { status: 'failed', results: { cancelled: true, timestamp: Date.now() } });
-        } else {
-            const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
-            const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
-            const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
-            if (failedSubtasks.length > 0) {
-                await taskManager.updateTask(mainTask.id, { status: 'failed', results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
-                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');
-            } else {
-                await taskManager.updateTask(mainTask.id, { status: 'completed', results: { completedSubtasks: completedSubtasks.length, timestamp: Date.now() } });
-                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" completed successfully! All ${completedSubtasks.length} subtasks finished.`, 'ai');
-            }
-        }
-        await DbManager.saveChatHistory(this.currentHistory);
+        await TaskOrchestrator.run({ chatService: this, userPrompt, chatMessages });
     },
 
     cancelMessage() {
         if (this.isSending) {
             this.isCancelled = true;
+            try { this.currentAbortController?.abort(); } catch (_) {}
         }
     },
 
@@ -851,10 +774,14 @@ Execute this task step by step. When completed, call the task_update tool to mar
             "Please summarize our conversation so far in a concise way. Include all critical decisions, file modifications, and key insights. The goal is to reduce the context size while retaining the essential information for our ongoing task. Start the summary with 'Here is a summary of our conversation so far:'.";
         
         // This needs to be a one-off call, not part of the main loop
-        const promptPack = PromptBuilder.build('code', '', {});
-        const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
-        const condensationHistory = [systemTurn, ...history, { role: 'user', parts: [{ text: condensationPrompt }] }];
-        const stream = this.llmService.sendMessageStream(condensationHistory, [], '');
+        const condensationHistory = [...history, { role: 'user', parts: [{ text: condensationPrompt }] }];
+        const stream = this.llmFacade
+            ? this.llmFacade.sendMessageStream(condensationHistory, [], 'code', '')
+            : this.llmService.sendMessageStream(
+                [{ role: 'system', parts: [{ text: PromptBuilder.build('code', '').systemPrompt }] }, ...history, { role: 'user', parts: [{ text: condensationPrompt }] }],
+                [],
+                ''
+              );
         let summaryText = '';
         for await (const chunk of stream) {
             if (chunk.text) {
@@ -1092,4 +1019,35 @@ Execute this task step by step. When completed, call the task_update tool to mar
        
        return insights;
    }
+,
+    
+    /**
+     * Expose provider debug info for UI panel
+     * Returns lightweight metrics and key rotation state without sensitive values.
+     */
+    getLLMDebugInfo() {
+        try {
+            const health = this.llmService?.getHealthStatus ? this.llmService.getHealthStatus() : null;
+            const apiKeyIndex = this.llmService?.apiKeyManager?.currentIndex ?? null;
+            const triedAllKeys = this.llmService?.apiKeyManager?.hasTriedAllKeys ? this.llmService.apiKeyManager.hasTriedAllKeys() : null;
+            const currentKeyMasked = (() => {
+                const mgr = this.llmService?.apiKeyManager;
+                if (!mgr || !mgr.getCurrentKey) return null;
+                const key = mgr.getCurrentKey();
+                if (!key) return null;
+                return key.length <= 8 ? '********' : `${key.slice(0, 4)}...${key.slice(-2)}`;
+            })();
+            return {
+                provider: this.currentProvider || health?.provider || (this.llmService?.constructor?.name || '').replace('Service', '').toLowerCase(),
+                model: this.llmService?.model ?? health?.model ?? null,
+                apiKeyIndex,
+                triedAllKeys,
+                currentKeyMasked,
+                isHealthy: health?.isHealthy ?? null,
+                metrics: health || null,
+            };
+        } catch (e) {
+            return { error: e?.message || String(e) };
+        }
+    }
 };

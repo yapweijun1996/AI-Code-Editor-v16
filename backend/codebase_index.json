@@ -175,10 +175,13 @@
     "#llm-status-container",
     "#llm-provider-status",
     "#settings-toggle-button",
+    "#debug-llm-toggle",
     "#token-usage-display",
     "#token-request",
     "#token-response",
     "#token-total",
+    "#llm-health-panel",
+    "#llm-health-json",
     "#chat-messages",
     "#chat-input-container",
     "#chat-toolbar",
@@ -246,6 +249,7 @@
     ".status-label",
     ".header-toolbar",
     ".toolbar-group",
+    ".llm-health-panel",
     ".dropdown",
     ".dropdown-button",
     ".dropdown-content",
@@ -279,6 +283,16 @@
     "Installation and Management",
     "Configuration",
     "Gemini API Key Rotation Policy",
+    "LLM Architecture, Reliability, and Test Harness",
+    "Provider-Agnostic Facade",
+    "Unified Reliability Controls (BaseLLMService)",
+    "Token Usage Normalization",
+    "Streaming Cancellation",
+    "LLM Debug Panel and Health Modal",
+    "Console Test Runners (Parity, Chaos, Cancellation, Prompts)",
+    "Provider Notes",
+    "Settings and Tuning",
+    "How To Use",
     "For Developers",
     "📚 Complete Documentation"
   ],
@@ -294,7 +308,12 @@
     "State Management",
     "System Stability and Error Handling",
     "Custom Rule Injection Workflow",
-    "High-Performance Diffing Architecture"
+    "High-Performance Diffing Architecture",
+    "LLM Observability, Health Metrics, and Debug Panel",
+    "Provider Health Metrics (BaseLLMService)",
+    "Centralized Retry, Backoff, and Key Rotation",
+    "Simple Circuit Breaker",
+    "In-App Debug Panel"
   ],
   "frontend/js/llm/error_policy.js": [
     "_result",
@@ -303,5 +322,17 @@
   ],
   "frontend/js/llm/key_rotation.js": [
     "KeyRotationSession"
+  ],
+  "frontend/js/llm/llm_facade.js": [
+    "LLMFacade"
+  ],
+  "frontend/js/llm/intent_classifier.js": [
+    "buildClassificationPrompt"
+  ],
+  "frontend/js/llm/service_factory.js": [
+    "LLMServiceFactory"
+  ],
+  "frontend/js/main.js": [
+    "initializeCoreServices"
   ]
 }

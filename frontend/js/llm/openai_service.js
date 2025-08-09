@@ -5,8 +5,9 @@ import { ToolAdapter } from './tool_adapter.js';
  * Concrete implementation for the OpenAI API.
  */
 export class OpenAIService extends BaseLLMService {
-    constructor(apiKeyManager, model) {
-        super(apiKeyManager, model);
+    constructor(apiKeyManager, model, providerConfig = {}, options = {}) {
+        super(apiKeyManager, model, options);
+        this.updateConfig(providerConfig);
         this.apiBaseUrl = 'https://api.openai.com/v1';
     }
 
@@ -24,11 +25,15 @@ export class OpenAIService extends BaseLLMService {
         }
 
         const messages = this._prepareMessages(history, customRules);
-        const toolDefinitions = ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition);
+        const toolDecl = ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition);
+        const enableTools = this.providerConfig?.enableTools !== false;
+        const tools = (enableTools && toolDecl) ? toolDecl : undefined;
+        const tool_choice = enableTools ? (this.providerConfig?.toolCallMode || 'auto') : 'none';
 
         const controller = new AbortController();
         const abortHandler = () => controller.abort();
-        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
+        const timeoutMs = this.options?.timeout ?? 300000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs); // configurable timeout
         if (abortSignal) {
             if (abortSignal.aborted) {
                 clearTimeout(timeoutId);
@@ -45,13 +50,19 @@ export class OpenAIService extends BaseLLMService {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${currentApiKey}`
                 },
-                body: JSON.stringify({
-                    model: this.model,
-                    messages: messages,
-                    tools: toolDefinitions,
-                    tool_choice: "auto",
-                    stream: true,
-                }),
+                body: JSON.stringify((() => {
+                    const payload = {
+                        model: this.model,
+                        messages,
+                        stream: true,
+                        temperature: this.providerConfig?.temperature,
+                        top_p: this.providerConfig?.topP,
+                        max_tokens: this.providerConfig?.maxTokens
+                    };
+                    if (tools) payload.tools = tools;
+                    payload.tool_choice = tool_choice;
+                    return payload;
+                })()),
                 signal: controller.signal,
             });
         } finally {
@@ -77,6 +88,9 @@ export class OpenAIService extends BaseLLMService {
         const decoder = new TextDecoder();
         let buffer = '';
         let currentToolCalls = {}; // State to aggregate tool call chunks
+        // Accumulate content and normalized usage across the entire stream
+        let accumulatedText = '';
+        let finalUsage = null;
 
         while (true) {
             const { done, value } = await reader.read();
@@ -98,6 +112,7 @@ export class OpenAIService extends BaseLLMService {
 
                         if (delta.content) {
                             yield { text: delta.content, functionCalls: null };
+                            accumulatedText += delta.content;
                         }
                         
                         if (delta.tool_calls) {
@@ -105,7 +120,19 @@ export class OpenAIService extends BaseLLMService {
                         }
                         
                         if (json.usage) {
-                             console.log('[OpenAI Service] Received usage data (but it will not be used):', json.usage);
+                            try {
+                                const pt = (json.usage.prompt_tokens ?? json.usage.input_tokens ?? 0);
+                                const ct = (json.usage.completion_tokens ?? json.usage.output_tokens ??
+                                    ((json.usage.total_tokens && (json.usage.prompt_tokens ?? json.usage.input_tokens))
+                                        ? (json.usage.total_tokens - (json.usage.prompt_tokens ?? json.usage.input_tokens))
+                                        : 0));
+                                finalUsage = {
+                                    promptTokenCount: pt,
+                                    candidatesTokenCount: ct
+                                };
+                            } catch (_) {
+                                // ignore malformed usage payloads
+                            }
                         }
 
                     } catch (e) {
@@ -120,10 +147,31 @@ export class OpenAIService extends BaseLLMService {
             }
         }
         
-         // After loop: any remaining buffer might contain final JSON with usage; ignore safely.
-        
+         // After loop: compute or emit normalized usage metadata
+         try {
+             if (!finalUsage) {
+                 // Fallback estimation using tokenizer if available
+                 let estPrompt = 0;
+                 let estResponse = 0;
+                 if (typeof GPTTokenizer_cl100k_base !== 'undefined') {
+                     const { encode } = GPTTokenizer_cl100k_base;
+                     const promptText = (messages || []).map(m => (m.content || '')).join('\n');
+                     estPrompt = encode(promptText).length;
+                     estResponse = encode(accumulatedText).length;
+                 }
+                 finalUsage = {
+                     promptTokenCount: estPrompt,
+                     candidatesTokenCount: estResponse
+                 };
+             }
+             // Emit a final usage chunk to normalize across providers
+             yield { text: '', functionCalls: null, usageMetadata: finalUsage };
+         } catch (_) {
+             // non-fatal
+         }
+         
          // Successful completion handled by BaseLLMService KeyRotation policy (no provider-level rotation)
-    }
+     }
 
     _prepareMessages(history, customRules) {
         // Extract system prompt from incoming history (added by PromptBuilder in Chat layer)

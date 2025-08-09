@@ -6,8 +6,9 @@ import { ToolAdapter } from './tool_adapter.js';
  * Concrete implementation for the Google Gemini API.
  */
 export class GeminiService extends BaseLLMService {
-    constructor(apiKeyManager, model) {
-        super(apiKeyManager, model);
+    constructor(apiKeyManager, model, providerConfig = {}, options = {}) {
+        super(apiKeyManager, model, options);
+        this.updateConfig(providerConfig);
     }
 
     async isConfigured() {
@@ -28,10 +29,18 @@ export class GeminiService extends BaseLLMService {
 
         const genAI = new GoogleGenerativeAI(currentApiKey);
 
+        const toolDecl = ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition);
+        const tools = (this.providerConfig?.enableTools === false || !toolDecl) ? [] : [toolDecl];
+
         const model = genAI.getGenerativeModel({
             model: this.model,
             systemInstruction: { parts: [{ text: systemInstruction }] },
-            tools: [ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition)],
+            tools: tools.length ? tools : undefined,
+            generationConfig: {
+                temperature: this.providerConfig?.temperature,
+                topP: this.providerConfig?.topP,
+                maxOutputTokens: this.providerConfig?.maxTokens
+            }
         });
 
         const preparedHistory = this._prepareMessages(history);
@@ -50,8 +59,9 @@ export class GeminiService extends BaseLLMService {
         const lastUserMessage = history[history.length - 1].parts;
         console.log('Gemini last user message:', JSON.stringify(lastUserMessage, null, 2));
 
+        const timeoutMs = this.options?.timeout ?? 300000;
         const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Request timed out after 5 minutes")), 300000)
+            setTimeout(() => reject(new Error(`Request timed out after ${timeoutMs} ms`)), timeoutMs)
         );
         const abortPromise = abortSignal ? new Promise((_, reject) => {
             if (abortSignal.aborted) {

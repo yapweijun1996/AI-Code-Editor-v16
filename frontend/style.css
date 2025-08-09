@@ -3527,3 +3527,60 @@ button:hover {
     text-overflow: ellipsis;
 }
 
+
+/* ================================
+   LLM DEBUG PANEL STYLES
+   ================================ */
+
+.llm-health-panel {
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 0 10px 0;
+  max-height: 180px;
+  overflow: auto;
+  font-family: var(--font-family-monospace);
+  font-size: 11px;
+  color: var(--text);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+}
+
+#llm-debug-button {
+  background-color: var(--info);
+  border-color: var(--info);
+  color: #fff;
+  height: 24px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+#llm-debug-button:hover {
+  background-color: var(--info-hover);
+  border-color: var(--info-hover);
+}
+
+/* Modal fine-tuning for Debug Panel */
+#llm-debug-modal .modal-content {
+  max-width: 820px;
+  width: 90%;
+}
+#llm-debug-modal h2 {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+#llm-debug-content {
+  font-family: var(--font-family-monospace);
+  font-size: 12px;
+  background-color: var(--background);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
