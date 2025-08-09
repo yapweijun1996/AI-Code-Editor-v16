@@ -15,6 +15,11 @@ import { DbManager } from './db.js';
 import { taskManager } from './task_manager.js';
 import { todoListUI } from './todo_list_ui.js';
 import { registerFileSystemTools } from './tools/file_system_tools.js';
+import { registerCodeAnalysisTools } from './tools/code_analysis_tools.js';
+import { registerTaskManagerTools } from './tools/task_management_tools.js';
+import { registerWebResearchTools } from './tools/web_research_tools.js';
+import { registerEditorTools } from './tools/editor_tools.js';
+import { registerRefactoringTools } from './tools/refactoring_tools.js';
 
 // Legacy appState for backward compatibility during migration
 export const appState = {
@@ -132,6 +137,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await Settings.initialize();
     await taskManager.initialize();
     registerFileSystemTools();
+    registerCodeAnalysisTools();
+    registerTaskManagerTools();
+    registerWebResearchTools();
+    registerEditorTools();
+    registerRefactoringTools();
     await tryRestoreDirectory();
     
     // Setup one-time UI event listeners

@@ -68,13 +68,29 @@ export const TaskOrchestrator = {
         (taskManager.tasks.get(mainTask.id)?.context?.planOutlineHash) ||
         (mainTask.context?.planOutlineHash) ||
         '';
+
+      // Build baseline prompt context from TaskManager to include cross-task artifacts and guidance
+      const basePromptContext = (() => {
+        try {
+          return taskManager.buildPromptContext(nextTask.id, { tools_context: limitedHints });
+        } catch (e) {
+          console.warn('[TaskOrchestrator] buildPromptContext failed; falling back to local slots:', e.message);
+          return { slots: {} };
+        }
+      })();
+
+      // Merge our overlays (task summary/current focus/plan hash) with the baseline that already
+      // includes available_artifacts and execution_guidance from TaskManager.
       const promptContext = {
+        ...(basePromptContext || {}),
         compact: true,
         slots: {
+          ...(basePromptContext?.slots || {}),
           task_summary: `Main Task: ${mainTask.title}`,
           plan_outline_hash: planOutlineHash,
           current_focus: `Subtask: ${nextTask.title}${nextTask.description ? ' - ' + nextTask.description : ''}`,
-          tools_context: limitedHints
+          // Prefer explicit hints, fallback to any pre-filled tools_context from base
+          tools_context: limitedHints || basePromptContext?.slots?.tools_context || ''
         }
       };
 

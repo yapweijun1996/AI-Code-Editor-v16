@@ -307,6 +307,40 @@ export const ChatService = {
                 UI.showThinkingIndicator(chatMessages, 'AI is thinking...');
                 const mode = overrideMode || document.getElementById('agent-mode-selector').value;
                 const customRules = Settings.get(`custom.${mode}.rules`);
+
+                // PromptContext wiring: prefer provided, else derive from active task ("goal memory")
+                let effectivePromptContext = promptContext || null;
+                if (!effectivePromptContext) {
+                    try {
+                        const activeTaskId = taskManager.activeTask || null;
+                        if (activeTaskId) {
+                            effectivePromptContext = taskManager.buildPromptContext(activeTaskId, {
+                                tools_context: mode
+                            });
+                        } else {
+                            // Heuristic: if there's exactly one in-progress task, use it
+                            const tasks = Array.from(taskManager.tasks.values());
+                            const inProg = tasks.find(t => t.status === 'in_progress');
+                            if (inProg) {
+                                effectivePromptContext = taskManager.buildPromptContext(inProg.id, { tools_context: mode });
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[ChatService] Failed to build prompt context from task manager:', e);
+                    }
+                }
+                // Minimal debug: confirm prompt context slots when present
+                try {
+                    if (effectivePromptContext?.slots) {
+                        const s = effectivePromptContext.slots;
+                        console.log('[PromptContext] slots prepared:', {
+                            hasTaskSummary: !!s.task_summary,
+                            hasPlanOutline: !!s.plan_outline,
+                            planOutlineHash: s.plan_outline_hash || null,
+                            currentFocus: s.current_focus || null
+                        });
+                    }
+                } catch (_) {}
                 
                 // Enhanced tool definitions with smart recommendations
                 const caps = this.llmService.getCapabilities ? this.llmService.getCapabilities() : {};
@@ -334,9 +368,9 @@ export const ChatService = {
                 
                 let stream;
                 if (this.llmFacade) {
-                    stream = this.llmFacade.sendMessageStream(history, tools, mode, customRules, controller.signal, promptContext);
+                    stream = this.llmFacade.sendMessageStream(history, tools, mode, customRules, controller.signal, effectivePromptContext);
                 } else {
-                    const promptPack = PromptBuilder.build(mode, customRules, promptContext || {});
+                    const promptPack = PromptBuilder.build(mode, customRules, effectivePromptContext || {});
                     const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
                     const effectiveHistory = [systemTurn, ...history];
                     stream = this.llmService.sendMessageStream(effectiveHistory, tools, customRules, controller.signal);
@@ -460,6 +494,7 @@ export const ChatService = {
                 if (functionCalls.length > 0) {
                     // Execute all tools sequentially for all providers
                     const toolResults = [];
+                    let toolExecutionFailed = false;
                     for (const call of functionCalls) {
                         if (this.isCancelled) return;
                         console.log(`Executing tool: ${call.name} sequentially...`);
@@ -469,9 +504,11 @@ export const ChatService = {
                         try {
                             execResult = await RetryPolicy.execute(async (attempt) => {
                                 const res = await ToolExecutor.execute(call, this.rootDirectoryHandle);
-                                const toolError = res?.toolResponse?.response?.error;
-                                if (toolError) {
-                                    throw new Error(toolError);
+                                // The retry policy should throw an error on failure to trigger retries.
+                                // We check for explicit failure from the standardized tool response.
+                                if (!res.success) {
+                                    const errorMessage = res?.toolResponse?.response?.error || `Tool ${call.name} failed without a specific error message.`;
+                                    throw new Error(errorMessage);
                                 }
                                 return res;
                             }, 'tool', retryOptions, ({ attempt }) => {
@@ -484,19 +521,36 @@ export const ChatService = {
                                 toolResponse: {
                                     name: call.name,
                                     response: { error: e.message }
-                                }
+                                },
+                                success: false // Explicitly mark as failure
                             };
                             UI.appendMessage(chatMessages, `Tool ${call.name} failed after retries: ${e.message}`, 'ai-muted');
                         }
+
                         toolResults.push({
                             id: call.id,
                             name: execResult.toolResponse.name,
                             response: execResult.toolResponse.response,
                         });
+
+                        // ** FAIL-FAST LOGIC **
+                        // If the tool execution was not successful, stop the entire tool-calling loop.
+                        if (!execResult.success) {
+                            console.error(`[Fail-Fast] Halting tool execution due to failure in '${call.name}'.`);
+                            UI.showError(`Execution stopped: Tool '${call.name}' failed.`);
+                            toolExecutionFailed = true;
+                            break; // Exit the for-loop
+                        }
                     }
+
+                    // Always push the results so far, even if a failure occurred,
+                    // so the model has context on what succeeded before the failure.
                     history.push({ role: 'user', parts: toolResults.map(functionResponse => ({ functionResponse })) });
-                    
-                    if (singleTurn) {
+
+                    // If a tool failed, we stop the conversation loop.
+                    if (toolExecutionFailed) {
+                        continueLoop = false;
+                    } else if (singleTurn) {
                         continueLoop = false;
                     } else {
                         // For OpenAI: Continue the loop to get AI's next response

@@ -40,6 +40,9 @@ export const PromptBuilder = {
       current_focus: 800,     // ~200 tokens
       tools_context: 800,     // ~200 tokens
       code_context: 1600,     // ~400 tokens
+      // New slots to carry cross-task state and steering
+      available_artifacts: 1200,  // ~300 tokens
+      execution_guidance: 800,    // ~200 tokens
       ...(context.caps || {})
     };
 
@@ -148,6 +151,14 @@ export const PromptBuilder = {
 
     if (slots.code_context) {
       parts.push(this._section('Code Context', this._cap(slots.code_context, caps.code_context)));
+    }
+
+    if (slots.available_artifacts) {
+      parts.push(this._section('Available Artifacts', this._cap(slots.available_artifacts, caps.available_artifacts)));
+    }
+
+    if (slots.execution_guidance) {
+      parts.push(this._section('Execution Guidance', this._cap(slots.execution_guidance, caps.execution_guidance)));
     }
 
     return parts.filter(Boolean).join('\n\n').trim();

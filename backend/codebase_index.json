@@ -1,12 +1,4 @@
 {
-  "frontend/js/tool_executor.js": [
-    "trackToolPerformance",
-    "getOptimalTool",
-    "analyzeError",
-    "getSuggestedFix",
-    "getCachedResult",
-    "setCachedResult"
-  ],
   "backend/node_modules/htmlparser2/src/__fixtures__/Documents/Attributes.html": [
     "#test0",
     "#test1",
@@ -298,13 +290,13 @@
   ],
   "docs/ARCHITECTURE.md": [
     "Application Architecture",
-    "Core Philosophy: Client-Centric Design",
+    "Core Philosophy: Client-Centric and Decoupled",
     "Component Overview",
-    "Frontend Code Logic Flow",
+    "Decoupled Agent Architecture",
+    "Dynamic Tool Registration",
     "Multi-Provider LLM Architecture",
     "Provider Hierarchy",
     "API Key Rotation (Gemini Only)",
-    "End-to-End Workflow",
     "State Management",
     "System Stability and Error Handling",
     "Custom Rule Injection Workflow",

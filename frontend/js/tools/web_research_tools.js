@@ -1,5 +1,5 @@
 import { ToolRegistry } from '../tool_registry.js';
-import { UI } from '../ui.js';
+import { appendMessage } from '../ui.js';
 
 async function _readUrl({ url }) {
     const response = await fetch('/api/read-url', {
@@ -92,7 +92,8 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
         stageThreeComplete: false,
         taskId: task_id,
         stageTasks: stageTasks,
-        taskTools: taskTools
+        taskTools: taskTools,
+        failedUrlCount: 0
     };
 
     function extractKeywordsAndGenerateQueries(query, maxQueries = 5) {
@@ -228,7 +229,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
         
         const searchPromises = searchQueries.map(async (query, index) => {
             try {
-                UI.appendMessage(document.getElementById('chat-messages'),
+                appendMessage(document.getElementById('chat-messages'),
                     `🔍 Search ${index + 1}/${searchQueries.length}: "${query}"`, 'ai');
                 
                 const results = await _duckduckgoSearch({ query });
@@ -308,7 +309,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
         researchState.totalUrlsRead++;
         
         try {
-            UI.appendMessage(document.getElementById('chat-messages'),
+            appendMessage(document.getElementById('chat-messages'),
                 `📖 Reading: ${urlInfo.title || urlInfo.url} (Stage ${stage})`, 'ai');
             
             const urlContent = await _readUrl({ url: urlInfo.url });
@@ -335,6 +336,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
             return contentEntry;
         } catch (error) {
             console.warn(`[Research Stage ${stage}] Failed to read URL ${urlInfo.url}:`, error.message);
+            researchState.failedUrlCount++;
             
             researchState.allContent.push({
                 url: urlInfo.url,
@@ -442,7 +444,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
         
         for (const query of gapQueries) {
             try {
-                UI.appendMessage(document.getElementById('chat-messages'),
+                appendMessage(document.getElementById('chat-messages'),
                     `🔍 Focused search: "${query}" (Stage 3)`, 'ai');
                 
                 const searchResults = await _duckduckgoSearch({ query });
@@ -489,10 +491,10 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
 
     async function executeResearch() {
         try {
-            UI.appendMessage(document.getElementById('chat-messages'),
+            appendMessage(document.getElementById('chat-messages'),
                 `🚀 Starting multi-stage research for: "${query}"`, 'ai');
             
-            UI.appendMessage(document.getElementById('chat-messages'),
+            appendMessage(document.getElementById('chat-messages'),
                 `🔬 Stage 1: Extracting key concepts and performing broad exploration...`, 'ai');
                 
             const searchQueries = extractKeywordsAndGenerateQueries(query);
@@ -534,7 +536,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
                 }
             }
             
-            UI.appendMessage(document.getElementById('chat-messages'),
+            appendMessage(document.getElementById('chat-messages'),
                 `🔬 Stage 2: Analyzing content and identifying knowledge gaps...`, 'ai');
                 
             const gapQueries = analyzeContentAndIdentifyGaps();
@@ -562,7 +564,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
                 }
             }
             
-            UI.appendMessage(document.getElementById('chat-messages'),
+            appendMessage(document.getElementById('chat-messages'),
                 `🔬 Stage 3: Performing focused reading on knowledge gaps...`, 'ai');
                 
             await performFocusedReading(gapQueries);
@@ -583,7 +585,7 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
                 });
             }
             
-            UI.appendMessage(document.getElementById('chat-messages'),
+            appendMessage(document.getElementById('chat-messages'),
                 `✅ Research completed! Processed ${researchState.allContent.length} sources across 3 stages.`, 'ai');
                 
             if (researchState.taskTools && researchState.taskId) {
@@ -671,6 +673,14 @@ async function _performResearch({ query, max_results = 3, depth = 2, relevance_t
     function compileResults() {
         const successfulContent = researchState.allContent.filter(item => !item.error);
         const failedUrls = researchState.allContent.filter(item => item.error);
+
+        // ** RELIABILITY CHECK **
+        // If a significant portion of URL reads failed, throw an error to signal failure to the caller.
+        const failureThreshold = 0.25; // 25%
+        const totalAttempts = successfulContent.length + failedUrls.length;
+        if (totalAttempts > 0 && (failedUrls.length / totalAttempts) > failureThreshold) {
+            throw new Error(`Research quality compromised: ${failedUrls.length} out of ${totalAttempts} URL reads failed.`);
+        }
         
         const stage1Content = successfulContent.filter(item => item.stage === 1);
         const stage3Content = successfulContent.filter(item => item.stage === 3);
@@ -705,6 +715,7 @@ ${item.content}
         ).join('\n\n');
         
         return {
+            status: 'Success', // Keep status for compatibility, but error is thrown for failure
             summary: summary,
             full_content: fullContent,
             references: researchState.references,

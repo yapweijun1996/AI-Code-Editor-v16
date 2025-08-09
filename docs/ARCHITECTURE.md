@@ -2,82 +2,136 @@
 
 This document provides a high-level overview of the application's architecture. For a more detailed guide on the project structure, development workflow, and how to contribute, please see the **[Contributing Guide](./CONTRIBUTING.md)**.
 
-## Core Philosophy: Client-Centric Design
+## Core Philosophy: Client-Centric and Decoupled
 
-The application is architected to be **secure and frontend-heavy**. The majority of the logic, including all file system interactions, the editor, and the AI agent, runs directly in the browser. A minimal backend is used only for tasks that the browser's sandbox cannot perform.
+The application is architected to be **secure, extensible, and frontend-heavy**. The majority of the logic, including all file system interactions, the editor, and the AI agent, runs directly in the browser. A minimal backend is used only for tasks that the browser's sandbox cannot perform.
+
+The recent architectural refactoring has focused on decoupling core components to improve maintainability, testability, and extensibility, moving from a monolithic agent to a system of coordinated, single-responsibility services.
 
 ## Component Overview
 
 *   **Frontend**: A single-page application built with vanilla JavaScript, HTML, and CSS. It uses the Monaco Editor and manages all core application logic.
-*   **Backend**: A lightweight Node.js/Express server that serves static files and provides URL fetching capabilities. Terminal command execution has been removed to maintain security and client-centric architecture.
-*   **AI Agents**: Multi-provider AI system managed entirely on the client-side with:
-    *   **Service Factory** (`frontend/js/llm/service_factory.js`) - Creates appropriate LLM service instances
-    *   **Provider Services** - Gemini, OpenAI, and Ollama service implementations
-    *   **Chat Service** (`frontend/js/chat_service.js`) - Orchestrates interactions with all providers
+*   **Backend**: A lightweight Node.js/Express server that serves static files and provides URL fetching capabilities.
+*   **AI Agents**: A multi-provider AI system managed on the client-side, now composed of several decoupled services:
+    *   **`TaskOrchestrator`**: The central coordinator that manages the overall lifecycle of a user-initiated task.
+    *   **`TaskPlanner`**: A dedicated service responsible for breaking down high-level goals into concrete, executable steps using an LLM.
+    *   **`TaskStateManager`**: Manages the state of the active task, including its plan, execution history, and context.
+    *   **`ToolRegistry`**: A dynamic registry that allows tools to be defined in separate modules and registered at runtime, decoupling them from the executor.
+    *   **`ToolExecutor`**: The component responsible for executing tool calls requested by the AI. It now looks up tools in the `ToolRegistry`.
+    *   **Provider Services**: Gemini, OpenAI, and Ollama service implementations, managed by a `ServiceFactory`.
 
-## Frontend Code Logic Flow
+## Decoupled Agent Architecture
 
-This diagram illustrates the relationships and primary responsibilities of the key JavaScript modules in the `frontend/js` directory.
+The diagram below illustrates the new, decoupled architecture. The `TaskOrchestrator` acts as the entry point, coordinating between the `TaskPlanner` to create a plan, the `TaskStateManager` to track progress, and the `ChatService` (which uses the `ToolExecutor`) to execute steps.
 
 ```mermaid
 graph TD
-    subgraph User Interface
+    subgraph Core Services
         A[main.js]
         B[ui.js]
         S[settings.js]
     end
 
-    subgraph LLM Services
+    subgraph Decoupled Agent
+        TO[llm/task_orchestrator.js]
+        TP[task_planner.js]
+        TSM[task_state_manager.js]
         CS[chat_service.js]
-        SF[llm/service_factory.js]
-        GS[llm/gemini_service.js]
-        OS[llm/openai_service.js]
-        OLS[llm/ollama_service.js]
-        BS[llm/base_llm_service.js]
     end
 
-    subgraph Core Logic
-        D[tool_executor.js]
-        TL[tool_logger.js]
-        UM[undo_manager.js]
+    subgraph Tool System
+        TE[tool_executor.js]
+        TR[tool_registry.js]
+        T_FS[tools/file_system_tools.js]
+        T_CA[tools/code_analysis_tools.js]
+        T_WR[tools/web_research_tools.js]
+        T_Other[...]
     end
 
     subgraph Data & State
-        E[db.js]
-        F[api_manager.js]
-        CI[code_intel.js]
+        DB[db.js]
+        AM[api_manager.js]
     end
 
     subgraph Editor & Files
-        G[editor.js]
-        H[file_system.js]
-        EV[events.js]
+        ED[editor.js]
+        FS[file_system.js]
     end
 
-    A -- Initializes & Orchestrates --> G
-    A -- Handles User Input & Events --> CS
-    A -- Uses --> B
-    CS -- Creates Services --> SF
-    SF -- Instantiates --> GS
-    SF -- Instantiates --> OS
-    SF -- Instantiates --> OLS
-    GS -- Extends --> BS
-    OS -- Extends --> BS
-    OLS -- Extends --> BS
-    CS -- Uses --> D
-    CS -- Uses --> F
-    D -- Executes Tools --> H
-    D -- Executes Tools --> G
-    D -- Logs Actions --> TL
-    D -- Manages History --> UM
-    G -- Manages Monaco Instance --> A
-    E -- Manages IndexedDB --> A
-    E -- Manages IndexedDB --> CS
-    F -- Manages API Keys --> CS
-    S -- Manages Configuration --> CS
-    CI -- Indexes Codebase --> D
-    EV -- Handles Events --> A
+    A -- Initializes & Orchestrates --> TO
+    TO -- Uses --> TP
+    TO -- Uses --> TSM
+    TO -- Executes Steps Via --> CS
+    TP -- Creates Plan --> TSM
+    CS -- Uses --> TE
+    TE -- Looks up Tools --> TR
+    TR -- Registers --> T_FS
+    TR -- Registers --> T_CA
+    TR -- Registers --> T_WR
+    TR -- Registers --> T_Other
+    TE -- Executes --> FS
+    TE -- Executes --> ED
+    CS -- Manages --> AM
+    TSM -- Persists State --> DB
 ```
+
+This decoupled design provides several advantages:
+- **Separation of Concerns**: Each component has a single, well-defined responsibility.
+- **Extensibility**: Adding new tools is as simple as creating a new module and registering it in `main.js`. No changes are needed to the core execution logic.
+- **Testability**: Each component can be tested in isolation.
+- **Maintainability**: The codebase is easier to understand and modify.
+
+## Dynamic Tool Registration
+
+The new `ToolRegistry` (`frontend/js/tool_registry.js`) provides a centralized mechanism for managing tools. Instead of being hardcoded in the `ToolExecutor`, tools are now defined in their own modules within the `frontend/js/tools/` directory.
+
+Each tool module contains the tool's handler function and a registration function that adds it to the `ToolRegistry`.
+
+**Example: `file_system_tools.js`**
+```javascript
+// frontend/js/tools/file_system_tools.js
+
+import { ToolRegistry } from '../tool_registry.js';
+import * as FileSystem from '../file_system.js';
+
+// Handler function for the tool
+async function _getProjectStructure(params, rootHandle) {
+    const ignorePatterns = await FileSystem.getIgnorePatterns(rootHandle);
+    const tree = await FileSystem.buildStructureTree(rootHandle, ignorePatterns);
+    const structure = FileSystem.formatTreeToString(tree);
+    return { structure };
+}
+
+// Registration function
+export function registerFileSystemTools() {
+  ToolRegistry.register('get_project_structure', {
+    handler: _getProjectStructure,
+    requiresProject: true,
+    description: "Gets the project file structure."
+  });
+  // ... register other file system tools
+}
+```
+
+These modules are then imported and registered during application startup in `main.js`.
+
+**Example: `main.js`**
+```javascript
+// frontend/js/main.js
+
+import { registerFileSystemTools } from './tools/file_system_tools.js';
+import { registerCodeAnalysisTools } from './tools/code_analysis_tools.js';
+// ... other tool imports
+
+document.addEventListener('DOMContentLoaded', async () => {
+    // ... initialization
+    registerFileSystemTools();
+    registerCodeAnalysisTools();
+    // ... register other tool modules
+});
+```
+
+This pattern makes the system highly extensible and keeps the core `ToolExecutor` clean and focused on its single responsibility: executing tools.
 
 ## Multi-Provider LLM Architecture
 
@@ -148,36 +202,6 @@ Notes:
 - Success path rotates once so the next request continues round-robin.
 - With a single key, rotation is a no-op by design.
 - Duplicate keys reduce the usefulness of “all keys tried”; prefer unique keys per line.
-
-## End-to-End Workflow
-
-This diagram illustrates the primary interaction flow between the user, frontend, backend, and AI providers.
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Frontend (Browser) as FE
-    participant FileSystem API as FS
-    participant Backend (Node.js) as BE
-    participant Gemini AI as AI
-
-    User->>FE: Enters prompt (e.g., "Read app.js and tell me what it does")
-    FE->>AI: Sends user prompt
-
-    alt Client-Side Tool Execution (e.g., read_file)
-        AI-->>FE: Requests tool call: read_file('app.js')
-        FE->>FS: Uses File System Access API to get file handle
-        FS-->>FE: Returns file handle
-        FE->>FS: Reads file content
-        FS-->>FE: Returns file content
-        FE-->>AI: Sends file content as tool response
-    end
-
-    AI->>AI: Processes tool result and formulates answer
-    AI-->>FE: Streams final text response to user
-    FE->>User: Displays formatted AI response in chat
-    FE->>FE: Opens 'app.js' in Monaco Editor
-```
 
 ## State Management
 
