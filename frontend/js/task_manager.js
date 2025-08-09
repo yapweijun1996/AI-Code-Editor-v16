@@ -295,12 +295,20 @@ class TaskManager {
             mainTask.notes.push(breakdownNote);
             
             const totalEstimatedTime = subtasks.reduce((sum, t) => sum + (t.estimatedTime || 30), 0);
+            const planOutline = subtasks.map(st => ({
+                id: st.id,
+                title: st.title,
+                priority: st.priority,
+                estimatedTime: st.estimatedTime
+            }));
+            const planOutlineHash = this._computePlanOutlineHash(planOutline);
             
             await this.updateTask(mainTask.id, {
                 status: 'in_progress',
                 estimatedTime: totalEstimatedTime,
                 context: {
                     ...mainTask.context,
+                    planOutlineHash,
                     breakdown: {
                         method: 'ai-driven',
                         subtaskCount: subtasks.length,
@@ -363,10 +371,11 @@ CRITICAL:
 - Ensure tasks reflect all detected intents (e.g., Tailwind setup, JS scaffolding, and advisory ideas if requested).`;
 
         try {
-            // Send prompt without tools to avoid confusion
+            // Send prompt as single-turn (no-history) to minimize tokens
             const response = await ChatService.sendPrompt(prompt, {
                 tools: [], // No tools needed for JSON response
-                history: ChatService.currentHistory || [] // Use live history
+                history: [], // Avoid sending chat history for planning
+                mode: 'plan'
             });
             
             // Extract JSON from response with more robust parsing
@@ -465,7 +474,7 @@ CRITICAL:
                         priority: aiSubtask.priority || 'medium',
                         parentId: mainTask.id,
                         listId: mainTask.listId,
-                        dependencies: prevTaskId ? [prevTaskId] : [],
+                        dependencies: [],
                         estimatedTime: aiSubtask.estimatedTime || 30,
                         tags: ['ai-generated', 'subtask', 'ai-driven'],
                         context: {
@@ -475,7 +484,7 @@ CRITICAL:
                         }
                     });
                     subtasks.push(subtask);
-                    prevTaskId = subtask.id;
+                    
                 } catch (taskError) {
                     console.error(`[TaskManager] Failed to create subtask ${index}:`, taskError);
                     // Continue with other tasks even if one fails
@@ -516,7 +525,7 @@ CRITICAL:
                 priority: step.priority || 'medium',
                 parentId: mainTask.id,
                 listId: mainTask.listId,
-                dependencies: prevTaskId ? [prevTaskId] : [],
+                dependencies: [],
                 estimatedTime: step.estimatedTime || 30,
                 tags,
                 context: {
@@ -527,7 +536,7 @@ CRITICAL:
                 }
             });
             subtasks.push(subtask);
-            prevTaskId = subtask.id;
+            
         }
 
         return subtasks;
@@ -1030,6 +1039,26 @@ CRITICAL:
         return metrics;
     }
     
+    /**
+     * Hash plan outline to a compact fingerprint for drift detection and prompt references
+     */
+    _computePlanOutlineHash(planOutline) {
+        try {
+            const src = JSON.stringify(planOutline.map(i => ({ t: i.title, p: i.priority, e: i.estimatedTime })));
+            return this._hashString(src);
+        } catch (e) {
+            return String(Date.now());
+        }
+    }
+
+    _hashString(str) {
+        let hash = 5381;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+        }
+        return (hash >>> 0).toString(36);
+    }
+
     /**
      * Storage operations
      */

@@ -26,26 +26,13 @@ export const TaskOrchestrator = {
     const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
 
     // Seed conversation with task context
-    chatService.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
-    chatService.currentHistory.push({
-      role: 'user',
-      parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }]
-    });
-
-    // Force initial breakdown (tool: task_breakdown)
-    // If the model fails to call the tool, we fall back to internal breakdown to avoid empty plans.
-    await chatService._performApiCall(chatService.currentHistory, chatMessages, { singleTurn: true, overrideMode: 'plan' });
-
-    // Fallback: ensure we have subtasks to run
+    // Use internal AI-driven breakdown directly (no global chat-history usage)
+    chatService.activePlan = { id: mainTask.id };
     try {
-      const currentMain = taskManager.tasks.get(mainTask.id);
-      if (!currentMain || !Array.isArray(currentMain.subtasks) || currentMain.subtasks.length === 0) {
-        UI.appendMessage(chatMessages, 'No subtasks created by model. Using internal breakdown fallback...', 'ai');
-        const created = await taskManager.breakdownGoal(mainTask);
-        UI.appendMessage(chatMessages, `Added ${created.length} subtask(s) via internal breakdown.`, 'ai');
-      }
+      const created = await taskManager.breakdownGoal(mainTask);
+      UI.appendMessage(chatMessages, `Planned ${created.length} subtask(s).`, 'ai');
     } catch (fallbackErr) {
-      console.warn('[TaskOrchestrator] Fallback breakdown failed:', fallbackErr);
+      console.warn('[TaskOrchestrator] Internal breakdown failed:', fallbackErr);
       // Last-resort advisory subtask so flow can produce value
       const advisory = await taskManager.createTask({
         title: 'Produce 10 concrete improvement ideas for this project',
@@ -68,22 +55,22 @@ export const TaskOrchestrator = {
       await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
 
       const contextInfo = chatService._buildTaskContext(nextTask);
-      const toolHints = TaskOrchestrator._buildToolHints(nextTask);
+      const rawHints = TaskOrchestrator._buildToolHints(nextTask);
+      const limitedHints = TaskOrchestrator._limitHints(rawHints);
       const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
-Context: ${contextInfo}${toolHints ? `
+Context: ${contextInfo}${limitedHints ? `
 
 Helpful tool hints:
-${toolHints}` : ''}
-Execute this task step by step using available tools if needed.
-Task ID: ${nextTask.id}.
-When the work is finished, stop. The system will mark the task as completed.`;
+${limitedHints}` : ''}
+Execute this task using available tools if needed. Provide only the necessary steps.
+Stop when the work is finished.`;
       
-      chatService.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
+      const ephemeralHistory = [{ role: 'user', parts: [{ text: prompt }] }];
 
       let executionResult = null;
       try {
         const startTime = Date.now();
-        await chatService._performApiCall(chatService.currentHistory, chatMessages, { singleTurn: false });
+        await chatService._performApiCall(ephemeralHistory, chatMessages, { singleTurn: false });
         const endTime = Date.now();
         const updatedTask = taskManager.tasks.get(nextTask.id);
         if (updatedTask && updatedTask.status === 'in_progress') {
@@ -167,6 +154,7 @@ When the work is finished, stop. The system will mark the task as completed.`;
     }
 
     await DbManager.saveChatHistory(chatService.currentHistory);
+    chatService.activePlan = null;
   },
 
   /**
@@ -207,6 +195,17 @@ When the work is finished, stop. The system will mark the task as completed.`;
       }
 
       return hints.length ? hints.join('\n') : '';
+    } catch (_) {
+      return '';
+    }
+  },
+
+  _limitHints(hintsText) {
+    try {
+      if (!hintsText) return '';
+      const lines = hintsText.split('\n').filter(l => l.trim().startsWith('-'));
+      const top2 = lines.slice(0, 2).join('\n');
+      return top2.length > 220 ? `${top2.slice(0, 217)}...` : top2;
     } catch (_) {
       return '';
     }

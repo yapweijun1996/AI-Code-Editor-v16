@@ -75,51 +75,14 @@ export class OllamaService extends BaseLLMService {
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let buffer = '';
 
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
 
-            // Accumulate streamed bytes and process line-delimited JSON
-            buffer += decoder.decode(value, { stream: true });
-
-            // Process complete lines
-            let newlineIndex;
-            while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-                const line = buffer.slice(0, newlineIndex).trim();
-                buffer = buffer.slice(newlineIndex + 1);
-                if (!line) continue;
-                try {
-                    const json = JSON.parse(line);
-                    if (json.done) {
-                        yield {
-                            usageMetadata: {
-                                promptTokenCount: json.prompt_eval_count,
-                                candidatesTokenCount: json.eval_count,
-                            }
-                        };
-                        // No API key rotation for Ollama; simply return.
-                        return;
-                    }
-                    if (json.message?.content) {
-                        yield {
-                            text: json.message.content,
-                            functionCalls: null // No function calling support in this implementation
-                        };
-                    }
-                } catch (e) {
-                    // Some chunks may be partial or non-JSON; skip quietly to be robust
-                    console.debug('Ollama stream non-JSON/partial line skipped:', line);
-                }
-            }
-        }
-
-        // Flush any remaining buffered content
-        const remaining = buffer.trim();
-        if (remaining) {
+            const chunk = decoder.decode(value);
             try {
-                const json = JSON.parse(remaining);
+                const json = JSON.parse(chunk);
                 if (json.done) {
                     yield {
                         usageMetadata: {
@@ -127,16 +90,17 @@ export class OllamaService extends BaseLLMService {
                             candidatesTokenCount: json.eval_count,
                         }
                     };
+                    // No API key rotation for Ollama; simply return.
                     return;
                 }
                 if (json.message?.content) {
                     yield {
                         text: json.message.content,
-                        functionCalls: null
+                        functionCalls: null // No function calling support in this basic implementation
                     };
                 }
-            } catch (_) {
-                // ignore trailing partial
+            } catch (e) {
+                console.error('Error parsing Ollama stream chunk:', e);
             }
         }
     }
@@ -186,7 +150,7 @@ export class OllamaService extends BaseLLMService {
 **2. STREAMLINED TOOL USAGE**
 Note: Tool calling may be limited in Ollama. When tools are available:
 - Use read_file to understand existing code before modifications
-- Prefer apply_diff for precise, surgical changes; if multiple ranges or very large files, use edit_file with an edits array
+- Apply create_and_apply_diff for precise file changes
 - Use search_code to locate specific patterns efficiently
 
 **3. FILE OPERATIONS**

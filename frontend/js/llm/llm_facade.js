@@ -98,13 +98,13 @@ export class LLMFacade {
    * @param {AbortSignal|null} abortSignal - Optional AbortSignal to cancel the request
    * @returns {AsyncGenerator<{ text?: string, functionCalls?: any, usageMetadata?: any }>}
    */
-  async *sendMessageStream(history, internalTools = null, mode = 'code', customRules = '', abortSignal = null) {
+  async *sendMessageStream(history, internalTools = null, mode = 'code', customRules = '', abortSignal = null, promptContext = null) {
     if (!this.llmService) {
       throw new Error('LLMFacade not initialized with a valid llmService');
     }
 
-    // Build unified system prompt and ensure it is present
-    const promptPack = PromptBuilder.build(mode, customRules);
+    // Build unified system prompt (with optional slot caps) and ensure it is present
+    const promptPack = PromptBuilder.build(mode, customRules, promptContext || {});
     const effectiveHistory = this._ensureSystemTurn(history, promptPack.systemPrompt);
 
     // Prepare provider-specific tool declarations
@@ -135,7 +135,8 @@ export class LLMFacade {
       tools = null,
       mode = 'code',
       customRules = '',
-      abortSignal = null
+      abortSignal = null,
+      promptContext = null
     } = options;
 
     const messageHistory = [
@@ -144,7 +145,7 @@ export class LLMFacade {
     ];
 
     let fullText = '';
-    for await (const chunk of this.sendMessageStream(messageHistory, tools, mode, customRules, abortSignal)) {
+    for await (const chunk of this.sendMessageStream(messageHistory, tools, mode, customRules, abortSignal, promptContext)) {
       if (chunk?.text) {
         fullText += chunk.text;
       }

@@ -525,7 +525,7 @@ export const ChatService = {
             const tools = options.tools ? options.tools : (providerSupportsTools ? ToolExecutor.getToolDefinitions() : []);
             const customRules = options.customRules || '';
 
-            const mode = document.getElementById('agent-mode-selector')?.value || 'code';
+            const mode = options.mode || document.getElementById('agent-mode-selector')?.value || 'code';
             const abortSignal = options.abortSignal || null;
             // Build message history without system; Facade will ensure system turn
             const messageHistory = [...history, {
