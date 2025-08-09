@@ -16,6 +16,7 @@ import { ToolAdapter } from './llm/tool_adapter.js';
 import { LLMFacade } from './llm/llm_facade.js';
 import { IntentClassifier } from './llm/intent_classifier.js';
 import { TaskOrchestrator } from './llm/task_orchestrator.js';
+import { RetryPolicy } from './llm/retry_policy.js';
 
 export const ChatService = {
     isSending: false,
@@ -463,11 +464,34 @@ export const ChatService = {
                         if (this.isCancelled) return;
                         console.log(`Executing tool: ${call.name} sequentially...`);
                         UI.showThinkingIndicator(chatMessages, `Executing tool: ${call.name}...`);
-                        const result = await ToolExecutor.execute(call, this.rootDirectoryHandle);
+                        const retryOptions = { maxAttempts: 3, baseDelayMs: 800, maxDelayMs: 8000, multiplier: 2, jitter: 'equal' };
+                        let execResult;
+                        try {
+                            execResult = await RetryPolicy.execute(async (attempt) => {
+                                const res = await ToolExecutor.execute(call, this.rootDirectoryHandle);
+                                const toolError = res?.toolResponse?.response?.error;
+                                if (toolError) {
+                                    throw new Error(toolError);
+                                }
+                                return res;
+                            }, 'tool', retryOptions, ({ attempt }) => {
+                                if (attempt > 1) {
+                                    UI.appendMessage(chatMessages, `Retrying ${call.name} (attempt ${attempt}/${retryOptions.maxAttempts})...`, 'ai-muted');
+                                }
+                            });
+                        } catch (e) {
+                            execResult = {
+                                toolResponse: {
+                                    name: call.name,
+                                    response: { error: e.message }
+                                }
+                            };
+                            UI.appendMessage(chatMessages, `Tool ${call.name} failed after retries: ${e.message}`, 'ai-muted');
+                        }
                         toolResults.push({
                             id: call.id,
-                            name: result.toolResponse.name,
-                            response: result.toolResponse.response,
+                            name: execResult.toolResponse.name,
+                            response: execResult.toolResponse.response,
                         });
                     }
                     history.push({ role: 'user', parts: toolResults.map(functionResponse => ({ functionResponse })) });

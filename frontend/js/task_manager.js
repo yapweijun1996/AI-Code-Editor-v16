@@ -331,142 +331,34 @@ class TaskManager {
      * AI-driven task breakdown using LLM intelligence
      */
     async _aiDrivenTaskBreakdown(mainTask) {
-        // Import ChatService dynamically to avoid circular dependency
-        const { ChatService } = await import('./chat_service.js');
-        // ChatService is exported as an object, not a class, so use it directly
-        
-        const prompt = `You are an expert technical project planner. Break down the user's goal into concrete, executable subtasks with clear intent grouping and dependencies.
-
-TASK: "${mainTask.title}"
-DESCRIPTION: "${mainTask.description || 'No additional description provided'}"
-
-PLANNING RULES:
-1) Detect multi-intent prompts and decompose them. Common intents include:
-   - setup_tailwind (e.g., inject Tailwind via CDN if not installed)
-   - create_js_files (e.g., scaffold multiple JS modules/files)
-   - generate_ideas (e.g., produce 10 concrete improvement ideas)
-   - modify_files, search_codebase, bug_fix, refactor, write_tests
-2) Prefer steps that can be executed via repository/file tools (read/search/write/apply_diff).
-3) If a requested action cannot be executed directly (e.g., missing context or unavailable tools), include an "advisory" subtask that produces useful output (e.g., 10 ideas with rationale).
-4) Avoid vague tasks like "analyze requirements". Use specific actions such as:
-   - "Inject Tailwind CDN link into frontend/index.html (head) and add a sample utility class to verify"
-   - "Create JS files under frontend/js/modules/: dom_utils.js, api_client.js, state_store.js with minimal exports"
-   - "Generate 10 concrete improvement ideas with brief justifications"
-5) Each subtask must include: title, description, priority (low|medium|high|urgent), and estimatedTime (minutes).
-6) Produce between 3 and 6 subtasks. Order them with sensible dependencies (first steps unblock later ones).
-
-Return ONLY a valid JSON array in this exact format (no markdown, no code fences, no commentary):
-[
-  {
-    "title": "Specific actionable task title",
-    "description": "Detailed description of what to do",
-    "priority": "high",
-    "estimatedTime": 20
-  }
-]
-
-CRITICAL:
-- Your response must start with [ and end with ].
-- Do not include any text before or after the JSON array.
-- Ensure tasks reflect all detected intents (e.g., Tailwind setup, JS scaffolding, and advisory ideas if requested).`;
+        // Use external TaskPlanner to generate plan (LLM-based)
+        const { TaskPlanner } = await import('./task_planner.js');
+        const planner = new TaskPlanner();
 
         try {
-            // Send prompt as single-turn (no-history) to minimize tokens
-            const response = await ChatService.sendPrompt(prompt, {
-                tools: [], // No tools needed for JSON response
-                history: [], // Avoid sending chat history for planning
-                mode: 'plan'
-            });
-            
-            // Extract JSON from response with more robust parsing
-            let jsonArray = null;
-            
-            // Try multiple approaches to extract JSON
-            // 1. Look for JSON array in response
-            let jsonMatch = response.match(/\[[\s\S]*?\]/);
-            if (jsonMatch) {
-                try {
-                    jsonArray = JSON.parse(jsonMatch[0]);
-                } catch (e) {
-                    console.warn('[TaskManager] Failed to parse first JSON match:', e.message);
-                }
-            }
-            
-            // 2. If first approach fails, try to find JSON between code blocks
-            if (!jsonArray) {
-                const codeBlockMatch = response.match(/```(?:json)?\n?([\s\S]*?)\n?```/);
-                if (codeBlockMatch) {
-                    try {
-                        jsonArray = JSON.parse(codeBlockMatch[1]);
-                    } catch (e) {
-                        console.warn('[TaskManager] Failed to parse code block JSON:', e.message);
-                    }
-                }
-            }
-            
-            // 3. If still no JSON, try to extract from the full response
-            if (!jsonArray) {
-                try {
-                    // Look for lines that start with [ and end with ]
-                    const lines = response.split('\n');
-                    const jsonLines = [];
-                    let inArray = false;
-                    let braceCount = 0;
-                    
-                    for (const line of lines) {
-                        if (line.trim().startsWith('[')) {
-                            inArray = true;
-                            braceCount = 0;
-                        }
-                        
-                        if (inArray) {
-                            jsonLines.push(line);
-                            braceCount += (line.match(/\[/g) || []).length;
-                            braceCount -= (line.match(/\]/g) || []).length;
-                            
-                            if (braceCount === 0 && line.trim().endsWith(']')) {
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (jsonLines.length > 0) {
-                        jsonArray = JSON.parse(jsonLines.join('\n'));
-                    }
-                } catch (e) {
-                    console.warn('[TaskManager] Failed to parse line-by-line JSON:', e.message);
-                }
-            }
-            
-            if (!jsonArray) {
-                console.error('[TaskManager] AI response:', response);
-                throw new Error('No valid JSON array found in AI response');
-            }
-            
-            const aiSubtasks = jsonArray;
-            
+            const aiSubtasks = await planner.generatePlan(mainTask);
+
             // Validate and create actual subtasks
             const subtasks = [];
-            let prevTaskId = null;
-            
+
             // Ensure aiSubtasks is actually an array
             if (!Array.isArray(aiSubtasks)) {
-                console.error('[TaskManager] AI response is not an array:', aiSubtasks);
-                throw new Error('AI response must be a JSON array of tasks');
+                console.error('[TaskManager] Planner response is not an array:', aiSubtasks);
+                throw new Error('Planner response must be a JSON array of tasks');
             }
-            
+
             if (aiSubtasks.length === 0) {
-                console.warn('[TaskManager] AI returned empty task array');
-                throw new Error('AI returned no subtasks');
+                console.warn('[TaskManager] Planner returned empty task array');
+                throw new Error('Planner returned no subtasks');
             }
-            
+
             for (const [index, aiSubtask] of aiSubtasks.entries()) {
                 // Validate required fields
                 if (!aiSubtask.title) {
                     console.error(`[TaskManager] Subtask ${index} missing title:`, aiSubtask);
                     continue; // Skip invalid tasks
                 }
-                
+
                 try {
                     const subtask = await this.createTask({
                         title: aiSubtask.title,
@@ -484,16 +376,15 @@ CRITICAL:
                         }
                     });
                     subtasks.push(subtask);
-                    
                 } catch (taskError) {
                     console.error(`[TaskManager] Failed to create subtask ${index}:`, taskError);
                     // Continue with other tasks even if one fails
                 }
             }
-            
+
             return subtasks;
         } catch (error) {
-            console.error('[TaskManager] AI breakdown parsing failed:', error);
+            console.error('[TaskManager] Planner failed:', error);
             throw error;
         }
     }

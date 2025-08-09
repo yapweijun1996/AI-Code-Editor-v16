@@ -10,6 +10,7 @@
 import { taskManager } from '../task_manager.js';
 import * as UI from '../ui.js';
 import { DbManager } from '../db.js';
+import { TaskStateManager } from '../task_state_manager.js';
 
 export const TaskOrchestrator = {
   /**
@@ -24,6 +25,8 @@ export const TaskOrchestrator = {
     await taskManager.clearActiveTasks();
     UI.appendMessage(chatMessages, `Task created: "${userPrompt}"`, 'ai');
     const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
+    const tsm = new TaskStateManager();
+    tsm.initialize(mainTask);
 
     // Seed conversation with task context
     // Use internal AI-driven breakdown directly (no global chat-history usage)
@@ -31,6 +34,7 @@ export const TaskOrchestrator = {
     try {
       const created = await taskManager.breakdownGoal(mainTask);
       UI.appendMessage(chatMessages, `Planned ${created.length} subtask(s).`, 'ai');
+      try { tsm.registerSubtasks(created.map(t => t.id)); } catch (e) { console.warn('[TaskOrchestrator] State registration failed:', e.message); }
     } catch (fallbackErr) {
       console.warn('[TaskOrchestrator] Internal breakdown failed:', fallbackErr);
       // Last-resort advisory subtask so flow can produce value
@@ -53,6 +57,7 @@ export const TaskOrchestrator = {
       executionAttempts++;
       UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
       await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
+      try { tsm.setSubtaskStatus(nextTask.id, 'in_progress'); } catch (e) { console.warn('[TaskOrchestrator] State update (in_progress) failed:', e.message); }
 
       const contextInfo = chatService._buildTaskContext(nextTask);
       const rawHints = TaskOrchestrator._buildToolHints(nextTask);
@@ -91,6 +96,7 @@ Stop when the work is finished.`;
             status: 'completed',
             results: { completedAutomatically: true, timestamp: Date.now(), executionTime: endTime - startTime }
           });
+          try { tsm.setSubtaskStatus(nextTask.id, 'completed', { results: { completedAutomatically: true, executionTime: endTime - startTime } }); } catch (e) { console.warn('[TaskOrchestrator] State update (completed) failed:', e.message); }
           executionResult = { success: true, executionTime: endTime - startTime };
         } else {
           executionResult = {
@@ -103,6 +109,11 @@ Stop when the work is finished.`;
         console.error(`[TaskOrchestrator] Error executing task ${nextTask.id}:`, error);
         const errorAnalysis = chatService._analyzeTaskError(nextTask, error);
         executionResult = { error: error.message, timestamp: Date.now(), analysis: errorAnalysis };
+
+        // Task state tracking
+        try { tsm.recordError(nextTask.id, error); } catch (e) { console.warn('[TaskOrchestrator] State error record failed:', e.message); }
+        try { tsm.incrementAttempt(nextTask.id); } catch (e) { console.warn('[TaskOrchestrator] State attempt increment failed:', e.message); }
+
         if (errorAnalysis.canRecover && errorAnalysis.retryCount < 2) {
           UI.appendMessage(chatMessages, `Task "${nextTask.title}" encountered an error. Attempting recovery...`, 'ai');
           await taskManager.updateTask(nextTask.id, {
@@ -114,9 +125,11 @@ Stop when the work is finished.`;
               }]
             }
           });
+          try { tsm.setSubtaskStatus(nextTask.id, 'pending', { note: 'recoverable error, will retry' }); } catch (e) { console.warn('[TaskOrchestrator] State update (pending) failed:', e.message); }
           await taskManager.replanBasedOnResults(nextTask.id, executionResult);
         } else {
           await taskManager.updateTask(nextTask.id, { status: 'failed', results: executionResult });
+          try { tsm.setSubtaskStatus(nextTask.id, 'failed', { note: error.message }); } catch (e) { console.warn('[TaskOrchestrator] State update (failed) failed:', e.message); }
           UI.appendMessage(chatMessages, `Task "${nextTask.title}" failed after recovery attempts: ${error.message}`, 'ai');
           await taskManager.replanBasedOnResults(nextTask.id, executionResult);
         }
@@ -144,6 +157,18 @@ Stop when the work is finished.`;
       const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
       const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
       const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
+
+      // Finalize state tracking and add execution summary note
+      try {
+        const summary = tsm.finalize();
+        await taskManager.addNote(
+          mainTask.id,
+          `Execution summary: completed=${summary.metrics.completed}, failed=${summary.metrics.failed}, attempts=${summary.metrics.totalAttempts}`,
+          'system'
+        );
+      } catch (e) {
+        console.warn('[TaskOrchestrator] Could not add execution summary note:', e.message);
+      }
 
       if (allSubtasks.length === 0) {
         await taskManager.updateTask(mainTask.id, {

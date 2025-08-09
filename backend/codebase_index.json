@@ -336,5 +336,33 @@
     "buildClassificationPrompt",
     "buildMultiIntentPrompt",
     "safeParseJson"
+  ],
+  "frontend/js/tool_registry.js": [
+    "_ToolRegistry"
+  ],
+  "frontend/js/tools/file_system_tools.js": [
+    "stripMarkdownCodeBlock"
+  ],
+  "frontend/js/tools/task_management_tools.js": [
+    "_taskCreate",
+    "_taskUpdate",
+    "_taskDelete",
+    "_taskBreakdown",
+    "_taskGetNext"
+  ],
+  "frontend/js/tools/web_research_tools.js": [
+    "_readUrl",
+    "_duckduckgoSearch"
+  ],
+  "frontend/js/tools/editor_tools.js": [
+    "stripMarkdownCodeBlock",
+    "_getOpenFileContent",
+    "_getSelectedText",
+    "_setSelectedText",
+    "_replaceSelectedText",
+    "registerEditorTools"
+  ],
+  "frontend/js/tools/refactoring_tools.js": [
+    "stripMarkdownCodeBlock"
   ]
 }

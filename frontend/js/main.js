@@ -14,6 +14,7 @@ import { initializeEventListeners } from './events.js';
 import { DbManager } from './db.js';
 import { taskManager } from './task_manager.js';
 import { todoListUI } from './todo_list_ui.js';
+import { registerFileSystemTools } from './tools/file_system_tools.js';
 
 // Legacy appState for backward compatibility during migration
 export const appState = {
@@ -129,6 +130,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // --- Initialization ---
     await Settings.initialize();
+    await taskManager.initialize();
+    registerFileSystemTools();
     await tryRestoreDirectory();
     
     // Setup one-time UI event listeners

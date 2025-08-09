@@ -16,6 +16,7 @@ import { providerOptimizer } from './provider_optimizer.js';
 import { workerManager, ensureWorkersInitialized } from './worker_manager.js';
 import { cacheManager, operationCache } from './cache_manager.js';
 
+import { ToolRegistry } from './tool_registry.js';
 // Senior Engineer AI System Imports
 import { symbolResolver } from './symbol_resolver.js';
 import { dataFlowAnalyzer } from './data_flow_analyzer.js';
@@ -818,13 +819,9 @@ async function _createFile({ filename, content = '' }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, async (filePath) => {
-            try {
-                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
-                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
-            } catch (e) {
-                console.warn(`Failed to open ${filePath} after refresh:`, e);
-            }
+        await UI.refreshFileTree(rootHandle, (filePath) => {
+            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
         });
         await Editor.openFile(fileHandle, filename, document.getElementById('tab-bar'), false);
         document.getElementById('chat-input').focus();
@@ -910,13 +907,9 @@ async function _deleteFile({ filename }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, async (filePath) => {
-            try {
-                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
-                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
-            } catch (e) {
-                console.warn(`Failed to open ${filePath} after refresh:`, e);
-            }
+        await UI.refreshFileTree(rootHandle, (filePath) => {
+            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
         });
         
         return { message: `File '${filename}' deleted successfully.` };
@@ -949,13 +942,9 @@ async function _renameFile({ old_path, new_path }, rootHandle) {
 
         // Refresh the file tree so UI reflects the rename
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, async (filePath) => {
-            try {
-                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
-                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'), false);
-            } catch (e) {
-                console.warn(`Failed to open ${filePath} after refresh:`, e);
-            }
+        await UI.refreshFileTree(rootHandle, (filePath) => {
+            const fileHandlePromise = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            fileHandlePromise.then(fh => Editor.openFile(fh, filePath, document.getElementById('tab-bar'), false)).catch(() => {});
         });
 
         return { message: `File '${old_path}' renamed to '${new_path}' successfully.` };
@@ -1691,13 +1680,9 @@ async function _createFolder({ folder_path }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, async (filePath) => {
-            try {
-                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
-                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
-            } catch (e) {
-                console.warn(`Failed to open ${filePath} after refresh:`, e);
-            }
+        await UI.refreshFileTree(rootHandle, (filePath) => {
+            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
         });
         
         return { message: `Folder '${folder_path}' created successfully.` };
@@ -1724,13 +1709,9 @@ async function _deleteFolder({ folder_path }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, async (filePath) => {
-            try {
-                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
-                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
-            } catch (e) {
-                console.warn(`Failed to open ${filePath} after refresh:`, e);
-            }
+        await UI.refreshFileTree(rootHandle, (filePath) => {
+            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
         });
         
         return { message: `Folder '${folder_path}' deleted successfully.` };
@@ -1773,13 +1754,9 @@ async function _renameFolder({ old_folder_path, new_folder_path }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, async (filePath) => {
-            try {
-                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
-                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
-            } catch (e) {
-                console.warn(`Failed to open ${filePath} after refresh:`, e);
-            }
+        await UI.refreshFileTree(rootHandle, (filePath) => {
+            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
         });
         
         return { message: `Folder '${old_folder_path}' renamed to '${new_folder_path}' successfully.` };
@@ -2979,8 +2956,15 @@ async function _undoLastChange(params, rootHandle) {
 }
 
 async function _listTools() {
-   const toolNames = Object.keys(toolRegistry);
-   return { tools: toolNames };
+   try {
+     const dynamicNames = (typeof ToolRegistry.list === 'function') ? ToolRegistry.list() : [];
+     const builtinNames = Object.keys(builtInTools);
+     const toolNames = Array.from(new Set([...builtinNames, ...dynamicNames]));
+     return { tools: toolNames };
+   } catch (e) {
+     // Fallback to built-in only
+     return { tools: Object.keys(builtInTools) };
+   }
 }
 
 // --- Enhanced Code Comprehension Tools ---
@@ -3727,7 +3711,7 @@ async function _clearCacheForFile({ filename }) {
 
 // --- Tool Registry ---
 
-const toolRegistry = {
+const builtInTools = {
    list_tools: { handler: _listTools, requiresProject: false, createsCheckpoint: false },
     // Project-based tools
     get_project_structure: { handler: _getProjectStructure, requiresProject: true, createsCheckpoint: false },
@@ -3833,7 +3817,10 @@ async function createAutomaticCheckpoint() {
 
 async function executeTool(toolCall, rootDirectoryHandle) {
     const { name: toolName, args: parameters } = toolCall;
-    const tool = toolRegistry[toolName];
+
+    // Prefer dynamically registered tools, then fall back to built-ins
+    const registered = (typeof ToolRegistry.get === 'function') ? ToolRegistry.get(toolName) : null;
+    const tool = registered || builtInTools[toolName];
 
     if (!tool) {
         throw new Error(`Unknown tool '${toolName}'.`);
