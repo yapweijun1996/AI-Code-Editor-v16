@@ -1,4 +1,7 @@
 import { ErrorCategory, ErrorSeverity } from '../core/error_handler.js';
+import { ErrorPolicy } from './error_policy.js';
+import { RetryPolicy } from './retry_policy.js';
+import { KeyRotation } from './key_rotation.js';
 
 /**
  * Enhanced abstract base class for all LLM services
@@ -68,71 +71,138 @@ export class BaseLLMService {
     async *sendMessageStream(history, toolDefinition, customRules = '', abortSignal = null) {
         const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const startTime = performance.now();
-        
+
         this.requestCount++;
-        
+
+        // Centralized retry/rotation configuration
+        const providerKey = (this.getProviderKey ? this.getProviderKey() : this.constructor.name.replace('Service', '').toLowerCase());
+        const retryOptions = {
+            maxAttempts: this.options?.retryAttempts ?? 3,
+            baseDelayMs: this.options?.retryDelay ?? 1000,
+            multiplier: 2,
+            maxDelayMs: 12000,
+            jitter: 'full'
+        };
+
+        // Reset tried keys for a clean attempt set per user request
+        if (this.apiKeyManager?.resetTriedKeys) {
+            this.apiKeyManager.resetTriedKeys();
+        }
+        const rotationSession = KeyRotation.createSession(this.apiKeyManager, { rotateOnSuccess: false });
+
+        let hasYieldedAnything = false;
+        let attempt = 0;
+        let prevDelay = null;
+
         try {
-            // Check rate limits
-            await this.checkRateLimit();
-            
-            // Validate configuration
-            if (!(await this.isConfigured())) {
-                throw new Error(`${this.constructor.name} is not properly configured`);
+            // Retry loop for request-level failures
+            while (attempt < retryOptions.maxAttempts) {
+                attempt++;
+
+                try {
+                    // Rate limit gate
+                    await this.checkRateLimit();
+
+                    // Provider configuration validation
+                    if (!(await this.isConfigured())) {
+                        throw new Error(`${this.constructor.name} is not properly configured`);
+                    }
+
+                    // Service health gate
+                    if (!this.isHealthy) {
+                        throw new Error(`${this.constructor.name} is currently unhealthy`);
+                    }
+
+                    // Abort early if caller already aborted
+                    if (abortSignal?.aborted) {
+                        const abortErr = new Error('Request aborted');
+                        abortErr.name = 'AbortError';
+                        throw abortErr;
+                    }
+
+                    // Rotate key before attempts after the first one
+                    rotationSession.onBeforeAttempt(attempt);
+
+                    console.log(`[${this.constructor.name}] Starting request ${requestId} (attempt ${attempt}/${retryOptions.maxAttempts})`);
+
+                    // Delegate to provider for streaming
+                    const streamGenerator = this._sendMessageStreamImpl(history, toolDefinition, customRules, abortSignal);
+
+                    for await (const chunk of streamGenerator) {
+                        hasYieldedAnything = true;
+                        yield chunk;
+                    }
+
+                    // Success path
+                    this.successfulRequests++;
+                    this.isHealthy = true;
+                    this.lastError = null;
+
+                    // Optional: rotate on success for strict round-robin across requests
+                    // rotationSession.onSuccess();
+
+                    // Exit retry loop on success
+                    break;
+
+                } catch (error) {
+                    // If aborted, do not retry
+                    if (abortSignal?.aborted) {
+                        const abortErr = error instanceof Error ? error : new Error(String(error));
+                        this.failedRequests++;
+                        this.lastError = abortErr;
+                        throw abortErr;
+                    }
+
+                    // Classify error
+                    const classified = ErrorPolicy.classify(providerKey, error);
+                    const triedAllKeys = this.apiKeyManager?.hasTriedAllKeys ? this.apiKeyManager.hasTriedAllKeys() : false;
+                    const canRetry = classified.retryable && attempt < retryOptions.maxAttempts && !triedAllKeys;
+
+                    console.warn(
+                        `[${this.constructor.name}] Request ${requestId} attempt ${attempt} failed [${classified.type}] retryable=${classified.retryable} ` +
+                        `status=${classified.httpStatus ?? 'n/a'} triedAllKeys=${triedAllKeys}:`,
+                        error
+                    );
+
+                    if (!canRetry) {
+                        // Final failure: rethrow enhanced error
+                        this.failedRequests++;
+                        this.lastError = error;
+
+                        const categorizedError = this.categorizeError(error);
+                        if (categorizedError.severity === ErrorSeverity.CRITICAL) {
+                            this.isHealthy = false;
+                        }
+
+                        const enhancedError = new Error(categorizedError.message);
+                        enhancedError.originalError = error;
+                        enhancedError.category = categorizedError.category;
+                        enhancedError.severity = categorizedError.severity;
+                        enhancedError.provider = this.constructor.name;
+                        enhancedError.requestId = requestId;
+                        throw enhancedError;
+                    }
+
+                    // Prepare next attempt: rotate and backoff
+                    rotationSession.onRetryableError();
+
+                    const delay = RetryPolicy.computeDelay(attempt, prevDelay, retryOptions);
+                    prevDelay = delay;
+
+                    console.log(`[${this.constructor.name}] Retrying in ${delay}ms...`);
+                    await new Promise(res => setTimeout(res, delay));
+                }
             }
-            
-            // Check service health
-            if (!this.isHealthy) {
-                throw new Error(`${this.constructor.name} is currently unhealthy`);
-            }
-            
-            console.log(`[${this.constructor.name}] Starting request ${requestId}`);
-            
-            // Delegate to provider-specific implementation
-            const streamGenerator = this._sendMessageStreamImpl(history, toolDefinition, customRules, abortSignal);
-            
-            let hasYielded = false;
-            for await (const chunk of streamGenerator) {
-                hasYielded = true;
-                yield chunk;
-            }
-            
-            // Track successful request
-            if (hasYielded) {
-                this.successfulRequests++;
-                this.isHealthy = true;
-                this.lastError = null;
-            }
-            
-        } catch (error) {
-            this.failedRequests++;
-            this.lastError = error;
-            
-            // Categorize and handle the error
-            const categorizedError = this.categorizeError(error);
-            
-            // Update health status
-            if (categorizedError.severity === ErrorSeverity.CRITICAL) {
-                this.isHealthy = false;
-            }
-            
-            console.error(`[${this.constructor.name}] Request ${requestId} failed:`, error);
-            
-            // Re-throw with enhanced error information
-            const enhancedError = new Error(categorizedError.message);
-            enhancedError.originalError = error;
-            enhancedError.category = categorizedError.category;
-            enhancedError.severity = categorizedError.severity;
-            enhancedError.provider = this.constructor.name;
-            enhancedError.requestId = requestId;
-            
-            throw enhancedError;
         } finally {
             // Update timing metrics
             const responseTime = performance.now() - startTime;
             this.totalResponseTime += responseTime;
             this.averageResponseTime = this.totalResponseTime / this.requestCount;
-            
-            console.log(`[${this.constructor.name}] Request ${requestId} completed in ${responseTime.toFixed(2)}ms`);
+
+            console.log(
+                `[${this.constructor.name}] Request ${requestId} ` +
+                `${hasYieldedAnything ? 'completed' : 'finished without output'} in ${responseTime.toFixed(2)}ms`
+            );
         }
     }
 
@@ -267,7 +337,7 @@ export class BaseLLMService {
      * Get service health status
      */
     getHealthStatus() {
-        const successRate = this.requestCount > 0 ? 
+        const successRate = this.requestCount > 0 ?
             (this.successfulRequests / this.requestCount * 100).toFixed(2) : 0;
             
         return {
@@ -284,6 +354,25 @@ export class BaseLLMService {
                 hasApiKey: !!this.apiKeyManager?.getCurrentKey?.(),
                 model: this.model,
                 ...this.providerConfig
+            }
+        };
+    }
+
+    /**
+     * Report provider capabilities for upstream consumers (Chat/Facade/Optimizers)
+     * Providers should override to supply accurate values.
+     */
+    getCapabilities() {
+        return {
+            provider: this.constructor.name.replace('Service', '').toLowerCase(),
+            supportsFunctionCalling: false,
+            supportsSystemInstruction: true,
+            nativeToolProtocol: 'none', // e.g., 'gemini_tools' | 'openai_tools' | 'none'
+            maxContext: 128000,
+            maxTokens: this.providerConfig?.maxTokens ?? 4096,
+            rateLimits: {
+                requestsPerMinute: this.options?.rateLimit?.requestsPerMinute ?? null,
+                tokensPerMinute: this.options?.rateLimit?.tokensPerMinute ?? null
             }
         };
     }

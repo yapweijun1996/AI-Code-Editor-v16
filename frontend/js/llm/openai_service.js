@@ -1,4 +1,5 @@
 import { BaseLLMService } from './base_llm_service.js';
+import { ToolAdapter } from './tool_adapter.js';
 
 /**
  * Concrete implementation for the OpenAI API.
@@ -15,40 +16,61 @@ export class OpenAIService extends BaseLLMService {
         return !!currentApiKey;
     }
 
-    async *sendMessageStream(history, tools, customRules, options = {}) {
+    async *_sendMessageStreamImpl(history, toolDefinition, customRules, abortSignal = null) {
         await this.apiKeyManager.loadKeys('openai');
         const currentApiKey = this.apiKeyManager.getCurrentKey();
         if (!currentApiKey) {
             throw new Error("OpenAI API key is not set or available.");
         }
 
-        const messages = this._prepareMessages(history, customRules, options);
-        const toolDefinitions = this._prepareTools(tools);
+        const messages = this._prepareMessages(history, customRules);
+        const toolDefinitions = ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition);
 
         const controller = new AbortController();
+        const abortHandler = () => controller.abort();
         const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
+        if (abortSignal) {
+            if (abortSignal.aborted) {
+                clearTimeout(timeoutId);
+                throw new Error('Request aborted');
+            }
+            abortSignal.addEventListener('abort', abortHandler, { once: true });
+        }
 
-        const response = await fetch(`${this.apiBaseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${currentApiKey}`
-            },
-            body: JSON.stringify({
-                model: this.model,
-                messages: messages,
-                tools: toolDefinitions,
-                tool_choice: "auto",
-                stream: true,
-            }),
-            signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
+        let response;
+        try {
+            response = await fetch(`${this.apiBaseUrl}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${currentApiKey}`
+                },
+                body: JSON.stringify({
+                    model: this.model,
+                    messages: messages,
+                    tools: toolDefinitions,
+                    tool_choice: "auto",
+                    stream: true,
+                }),
+                signal: controller.signal,
+            });
+        } finally {
+            clearTimeout(timeoutId);
+            if (abortSignal) {
+                abortSignal.removeEventListener('abort', abortHandler);
+            }
+        }
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(`OpenAI API Error: ${errorData.error.message}`);
+            let errorMessage = 'OpenAI API Error';
+            try {
+                const errorData = await response.json();
+                errorMessage = `OpenAI API Error: ${errorData?.error?.message || response.statusText}`;
+            } catch (_) {
+                // ignore JSON parse error
+                errorMessage = `OpenAI API Error: ${response.status} ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
         }
 
         const reader = response.body.getReader();
@@ -68,13 +90,11 @@ export class OpenAIService extends BaseLLMService {
                 if (line.startsWith('data: ')) {
                     const data = line.substring(6);
                     if (data === '[DONE]') {
-                        // Don't return immediately. The final chunk with usage stats might still be processed.
-                        // The loop will terminate naturally when reader.read() is done.
                         continue;
                     }
                     try {
                         const json = JSON.parse(data);
-                        const delta = json.choices[0].delta;
+                        const delta = json.choices?.[0]?.delta || {};
 
                         if (delta.content) {
                             yield { text: delta.content, functionCalls: null };
@@ -100,21 +120,29 @@ export class OpenAIService extends BaseLLMService {
             }
         }
         
-        // After the loop, process any remaining data in the buffer which might contain the final usage stats
-        if (buffer) {
-            // Buffer might contain final JSON with usage, but we are ignoring it.
-        }
+         // After loop: any remaining buffer might contain final JSON with usage; ignore safely.
+        
+         // Successful completion handled by BaseLLMService KeyRotation policy (no provider-level rotation)
     }
 
-    _prepareMessages(history, customRules, options = {}) {
-        const mode = document.getElementById('agent-mode-selector')?.value || 'code';
-        const systemPrompt = this._getSystemPrompt(mode, customRules, options);
-        const messages = [{ role: 'system', content: systemPrompt }];
+    _prepareMessages(history, customRules) {
+        // Extract system prompt from incoming history (added by PromptBuilder in Chat layer)
+        const systemPrompt = this._extractSystemPrompt(history, customRules);
+        const messages = [];
+
+        if (systemPrompt && systemPrompt.trim()) {
+            messages.push({ role: 'system', content: systemPrompt });
+        }
 
         // Track tool calls to ensure proper pairing
         const pendingToolCalls = new Map();
 
         for (const turn of history) {
+            if (turn.role === 'system') {
+                // Already captured via systemPrompt above; skip additional system turns
+                continue;
+            }
+
             if (turn.role === 'user') {
                 const toolResponses = turn.parts.filter(p => p.functionResponse);
                 if (toolResponses.length > 0) {
@@ -133,7 +161,7 @@ export class OpenAIService extends BaseLLMService {
                     });
                 } else {
                     const userContent = turn.parts.map(p => p.text).join('\n');
-                    if (userContent.trim()) {
+                    if (userContent && userContent.trim()) {
                         messages.push({ role: 'user', content: userContent });
                     }
                 }
@@ -161,7 +189,7 @@ export class OpenAIService extends BaseLLMService {
                     });
                 } else {
                     const modelContent = turn.parts.filter(p => p.text).map(p => p.text).join('\n');
-                    if (modelContent.trim()) {
+                    if (modelContent && modelContent.trim()) {
                         messages.push({ role: 'assistant', content: modelContent });
                     }
                 }
@@ -195,6 +223,23 @@ export class OpenAIService extends BaseLLMService {
         }
 
         return cleanedMessages;
+    }
+
+    _extractSystemPrompt(history, customRules) {
+        const sysTurn = history.find(t => t.role === 'system');
+        let text = '';
+        if (sysTurn && Array.isArray(sysTurn.parts)) {
+            text = sysTurn.parts.map(p => p.text).filter(Boolean).join('\n');
+        }
+        if (!text) {
+            // Fallback to legacy generator if no system prompt present
+            try {
+                text = this._getSystemPrompt('code', customRules, {});
+            } catch (_) {
+                text = customRules || '';
+            }
+        }
+        return text;
     }
 
     _getSystemPrompt(mode, customRules, options = {}) {
@@ -375,43 +420,7 @@ Current context:
         return systemPrompt;
     }
 
-    _convertGeminiParamsToOpenAI(params) {
-        const convert = (prop) => {
-            if (typeof prop !== 'object' || prop === null || !prop.type) {
-                return prop;
-            }
-
-            const newProp = { ...prop, type: prop.type.toLowerCase() };
-
-            if (newProp.type === 'object' && newProp.properties) {
-                const newProperties = {};
-                for (const key in newProp.properties) {
-                    newProperties[key] = convert(newProp.properties[key]);
-                }
-                newProp.properties = newProperties;
-            }
-
-            if (newProp.type === 'array' && newProp.items) {
-                newProp.items = convert(newProp.items);
-            }
-
-            return newProp;
-        };
-
-        return convert(params);
-    }
-
-    _prepareTools(geminiTools) {
-        if (!geminiTools || !geminiTools.functionDeclarations) return [];
-        return geminiTools.functionDeclarations.map(tool => ({
-            type: 'function',
-            function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: this._convertGeminiParamsToOpenAI(tool.parameters),
-            }
-        }));
-    }
+    // Tool conversion handled by ToolAdapter.toProviderDeclarations()
     _aggregateToolCalls(chunks, state) {
         chunks.forEach(chunk => {
             const { index, id, function: { name, arguments: args } } = chunk;
@@ -442,5 +451,25 @@ Current context:
             }
         }
         return completeCalls;
+    }
+
+    // Provider metadata and key
+    getProviderKey() {
+        return 'openai';
+    }
+
+    getCapabilities() {
+        return {
+            provider: 'openai',
+            supportsFunctionCalling: true,
+            supportsSystemInstruction: true,
+            nativeToolProtocol: 'openai_tools',
+            maxContext: 128000,
+            maxTokens: this.providerConfig?.maxTokens ?? 4096,
+            rateLimits: {
+                requestsPerMinute: this.options?.rateLimit?.requestsPerMinute ?? 3000,
+                tokensPerMinute: this.options?.rateLimit?.tokensPerMinute ?? null
+            }
+        };
     }
 }

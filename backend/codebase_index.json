@@ -295,5 +295,13 @@
     "System Stability and Error Handling",
     "Custom Rule Injection Workflow",
     "High-Performance Diffing Architecture"
+  ],
+  "frontend/js/llm/error_policy.js": [
+    "_result",
+    "_extractErrorInfo",
+    "_parseHttpStatusFromText"
+  ],
+  "frontend/js/llm/key_rotation.js": [
+    "KeyRotationSession"
   ]
 }

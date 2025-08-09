@@ -13,35 +13,61 @@ export class OllamaService extends BaseLLMService {
         return !!this.customConfig.baseURL && !!this.model;
     }
 
-    async *sendMessageStream(history, tools, customRules) {
+    async *_sendMessageStreamImpl(history, _toolDefinition, customRules, abortSignal = null) {
         if (!(await this.isConfigured())) {
             throw new Error("Ollama base URL and model name are not set.");
         }
 
-        const messages = this._prepareMessages(history, customRules);
-        
-        const response = await fetch(`${this.customConfig.baseURL}/api/chat`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model: this.model,
-                messages: messages,
-                stream: true,
-                // Note: Ollama's native tool support is still developing.
-                // This implementation will focus on text generation for now.
-            }),
-        });
+        const messages = this._prepareMessages(history);
+
+        const controller = new AbortController();
+        const abortHandler = () => controller.abort();
+        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
+        if (abortSignal) {
+            if (abortSignal.aborted) {
+                clearTimeout(timeoutId);
+                throw new Error('Request aborted');
+            }
+            abortSignal.addEventListener('abort', abortHandler, { once: true });
+        }
+
+        let response;
+        try {
+            response = await fetch(`${this.customConfig.baseURL}/api/chat`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model: this.model,
+                    messages: messages,
+                    stream: true,
+                    // Note: Ollama's native tool support is still developing.
+                    // This implementation will focus on text generation for now.
+                }),
+                signal: controller.signal,
+            });
+        } finally {
+            clearTimeout(timeoutId);
+            if (abortSignal) {
+                abortSignal.removeEventListener('abort', abortHandler);
+            }
+        }
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(`Ollama API Error: ${errorData.error}`);
+            let errMsg = 'Ollama API Error';
+            try {
+                const errorData = await response.json();
+                errMsg = `Ollama API Error: ${errorData?.error || response.statusText}`;
+            } catch (_) {
+                errMsg = `Ollama API Error: ${response.status} ${response.statusText}`;
+            }
+            throw new Error(errMsg);
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        
+
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -56,27 +82,38 @@ export class OllamaService extends BaseLLMService {
                             candidatesTokenCount: json.eval_count,
                         }
                     };
+                    // No API key rotation for Ollama; simply return.
                     return;
                 }
-                yield {
-                    text: json.message.content,
-                    functionCalls: null // No function calling support in this basic implementation
-                };
+                if (json.message?.content) {
+                    yield {
+                        text: json.message.content,
+                        functionCalls: null // No function calling support in this basic implementation
+                    };
+                }
             } catch (e) {
                 console.error('Error parsing Ollama stream chunk:', e);
             }
         }
     }
 
-    _prepareMessages(history, customRules) {
-        const mode = document.getElementById('agent-mode-selector')?.value || 'code';
-        const systemPrompt = this._getSystemPrompt(mode, customRules);
-        const messages = [{ role: 'system', content: systemPrompt }];
+    _prepareMessages(history) {
+        // Extract system prompt from incoming history (added by PromptBuilder in Chat layer)
+        const sysTurn = history.find(t => t.role === 'system');
+        const systemPrompt = sysTurn && Array.isArray(sysTurn.parts)
+            ? sysTurn.parts.map(p => p.text).filter(Boolean).join('\n')
+            : '';
+
+        const messages = [];
+        if (systemPrompt && systemPrompt.trim()) {
+            messages.push({ role: 'system', content: systemPrompt });
+        }
 
         history.forEach(turn => {
+            if (turn.role === 'system') return;
             const role = turn.role === 'model' ? 'assistant' : 'user';
-            const content = turn.parts.map(p => p.text).join('\n');
-            if (content) {
+            const content = (turn.parts || []).map(p => p.text).filter(Boolean).join('\n');
+            if (content && content.trim()) {
                 messages.push({ role, content });
             }
         });
@@ -208,5 +245,25 @@ Current session: ${timeString} (${timeZone})`;
         }
         
         return systemPrompt;
+    }
+
+    // Provider metadata and key
+    getProviderKey() {
+        return 'ollama';
+    }
+
+    getCapabilities() {
+        return {
+            provider: 'ollama',
+            supportsFunctionCalling: false,
+            supportsSystemInstruction: true,
+            nativeToolProtocol: 'none',
+            maxContext: 32000,
+            maxTokens: this.providerConfig?.maxTokens ?? 2048,
+            rateLimits: {
+                requestsPerMinute: null,
+                tokensPerMinute: null
+            }
+        };
     }
 }

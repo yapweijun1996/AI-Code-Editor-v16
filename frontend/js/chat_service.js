@@ -11,6 +11,8 @@ import { providerOptimizer } from './provider_optimizer.js';
 import { taskManager } from './task_manager.js';
 import { contextAnalyzer } from './context_analyzer.js';
 import { contextBuilder } from './context_builder.js';
+import { PromptBuilder } from './llm/prompt_builder.js';
+import { ToolAdapter } from './llm/tool_adapter.js';
 
 export const ChatService = {
     isSending: false,
@@ -44,6 +46,32 @@ export const ChatService = {
         // Initialize provider-specific optimizations
         this.currentProvider = llmSettings.provider;
         console.log(`LLM Service initialized with provider: ${llmSettings.provider}`);
+        
+        // Sync provider capabilities with providerOptimizer (temporary alignment)
+        try {
+            if (this.llmService?.getCapabilities) {
+                const caps = this.llmService.getCapabilities();
+                const providerKey = caps?.provider || this.currentProvider;
+                const existing = providerOptimizer.providerLimits[providerKey] || {};
+                // Map BaseLLMService capabilities into providerOptimizer schema
+                providerOptimizer.providerLimits[providerKey] = {
+                    ...existing,
+                    maxTokens: caps?.maxTokens ?? existing.maxTokens,
+                    contextWindow: caps?.maxContext ?? existing.contextWindow,
+                    // Heuristic mapping: function-calling implies structured outputs support
+                    supportsStructuredOutput: (typeof caps?.supportsFunctionCalling === 'boolean')
+                        ? caps.supportsFunctionCalling
+                        : existing.supportsStructuredOutput,
+                    // Preserve existing flag when capability not present
+                    supportsVision: existing.supportsVision ?? false,
+                    // Align request-per-minute if provided
+                    rateLimit: caps?.rateLimits?.requestsPerMinute ?? existing.rateLimit
+                };
+                console.log('[Capabilities Sync]', providerKey, providerOptimizer.providerLimits[providerKey]);
+            }
+        } catch (e) {
+            console.warn('[Capabilities Sync] Failed to align capabilities with providerOptimizer:', e);
+        }
         
         // Set up performance monitoring
         performanceOptimizer.startTimer('llm_initialization');
@@ -271,9 +299,11 @@ export const ChatService = {
                 const customRules = Settings.get(`custom.${mode}.rules`);
                 
                 // Enhanced tool definitions with smart recommendations
-                let tools = useTools ? ToolExecutor.getToolDefinitions() : [];
+                const caps = this.llmService.getCapabilities ? this.llmService.getCapabilities() : {};
+                const providerSupportsTools = caps.supportsFunctionCalling !== false;
+                let tools = (useTools && providerSupportsTools) ? ToolExecutor.getToolDefinitions() : [];
                 
-                if (useTools) {
+                if (useTools && providerSupportsTools) {
                     // Optimize tool selection for amend mode
                     if (mode === 'amend') {
                         const amendOptimizedTools = tools.functionDeclarations.map(tool => {
@@ -292,7 +322,10 @@ export const ChatService = {
                     }
                 }
                 
-                const stream = this.llmService.sendMessageStream(history, tools, customRules, { directAnalysis });
+                const promptPack = PromptBuilder.build(mode, customRules);
+                const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
+                const effectiveHistory = [systemTurn, ...history];
+                const stream = this.llmService.sendMessageStream(effectiveHistory, tools, customRules);
 
                 let modelResponseText = '';
                 let displayText = '';
@@ -308,7 +341,15 @@ export const ChatService = {
                         UI.appendMessage(chatMessages, displayText, 'ai', true);
                     }
                     if (chunk.functionCalls) {
-                        functionCalls.push(...chunk.functionCalls);
+                        const providerKey =
+                            caps.provider ||
+                            (this.llmService.getCapabilities ? this.llmService.getCapabilities().provider : null) ||
+                            this.currentProvider ||
+                            this.llmService.constructor.name.replace('Service', '').toLowerCase();
+                        const normalizedCalls = ToolAdapter.fromProviderCalls(providerKey, chunk.functionCalls);
+                        if (normalizedCalls && normalizedCalls.length > 0) {
+                            functionCalls.push(...normalizedCalls);
+                        }
                     }
                     if (chunk.usageMetadata) {
                         // This is for Gemini, which provides accurate counts
@@ -396,11 +437,19 @@ export const ChatService = {
             }
 
             const history = options.history || [];
-            const tools = options.tools || ToolExecutor.getToolDefinitions();
+
+            // Decide tool availability based on provider capabilities
+            const caps = this.llmService.getCapabilities ? this.llmService.getCapabilities() : {};
+            const providerSupportsTools = caps.supportsFunctionCalling !== false;
+            const tools = options.tools ? options.tools : (providerSupportsTools ? ToolExecutor.getToolDefinitions() : []);
             const customRules = options.customRules || '';
 
-            // Create a simple message history
-            const messageHistory = [...history, {
+            const mode = document.getElementById('agent-mode-selector')?.value || 'code';
+            const promptPack = PromptBuilder.build(mode, customRules);
+            const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
+
+            // Create a simple message history with system prompt
+            const messageHistory = [systemTurn, ...history, {
                 role: 'user',
                 parts: [{ text: prompt }]
             }];
@@ -802,8 +851,10 @@ Execute this task step by step. When completed, call the task_update tool to mar
             "Please summarize our conversation so far in a concise way. Include all critical decisions, file modifications, and key insights. The goal is to reduce the context size while retaining the essential information for our ongoing task. Start the summary with 'Here is a summary of our conversation so far:'.";
         
         // This needs to be a one-off call, not part of the main loop
-        const condensationHistory = history.concat([{ role: 'user', parts: [{ text: condensationPrompt }] }]);
-        const stream = this.llmService.sendMessageStream(condensationHistory, [], ''); // No tools, no custom rules for summary
+        const promptPack = PromptBuilder.build('code', '', {});
+        const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
+        const condensationHistory = [systemTurn, ...history, { role: 'user', parts: [{ text: condensationPrompt }] }];
+        const stream = this.llmService.sendMessageStream(condensationHistory, [], '');
         let summaryText = '';
         for await (const chunk of stream) {
             if (chunk.text) {

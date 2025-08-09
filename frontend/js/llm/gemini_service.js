@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from 'https://esm.run/@google/generative-ai';
 import { BaseLLMService } from './base_llm_service.js';
+import { ToolAdapter } from './tool_adapter.js';
 
 /**
  * Concrete implementation for the Google Gemini API.
@@ -15,105 +16,78 @@ export class GeminiService extends BaseLLMService {
         return !!currentApiKey;
     }
 
-    async *sendMessageStream(history, tools, customRules = '') {
+    async *_sendMessageStreamImpl(history, toolDefinition, customRules = '', abortSignal = null) {
         await this.apiKeyManager.loadKeys('gemini');
-        this.apiKeyManager.resetTriedKeys(); // Reset for new request
 
-        while (true) {
-            const currentApiKey = this.apiKeyManager.getCurrentKey();
-            if (!currentApiKey) {
-                throw new Error("Gemini API key is not set or available.");
-            }
-
-            try {
-                const mode = document.getElementById('agent-mode-selector').value;
-                const systemInstruction = this._getSystemInstruction(mode, customRules);
-                
-                const genAI = new GoogleGenerativeAI(currentApiKey);
-
-                const model = genAI.getGenerativeModel({
-                    model: this.model,
-                    systemInstruction: { parts: [{ text: systemInstruction }] },
-                    tools: [tools],
-                });
-
-                const preparedHistory = this._prepareMessages(history);
-                console.log('Gemini prepared history:', JSON.stringify(preparedHistory, null, 2));
-
-                const chat = model.startChat({
-                    history: preparedHistory,
-                    safetySettings: [
-                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-                    ],
-                });
-
-                const lastUserMessage = history[history.length - 1].parts;
-                console.log('Gemini last user message:', JSON.stringify(lastUserMessage, null, 2));
-                
-                const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error("Request timed out after 5 minutes")), 300000)
-                );
-                const result = await Promise.race([
-                    chat.sendMessageStream(lastUserMessage),
-                    timeoutPromise
-                ]);
-
-                try {
-                    for await (const chunk of result.stream) {
-                        yield {
-                            text: chunk.text(),
-                            functionCalls: chunk.functionCalls(),
-                            usageMetadata: chunk.usageMetadata,
-                        };
-                    }
-                } catch (streamError) {
-                    console.error('Gemini streaming error:', streamError);
-                    console.error('Stream error details:', {
-                        message: streamError.message,
-                        stack: streamError.stack,
-                        name: streamError.name
-                    });
-                    // Re-throw as a retriable error so key rotation can handle it
-                    const retriableError = new Error(`Stream error: ${streamError.message}`);
-                    retriableError.originalError = streamError;
-                    throw retriableError;
-                }
-
-                // If we get here, the request was successful
-                this.apiKeyManager.rotateKey(); // Advance to next key for the next request (round-robin)
-                return;
-
-            } catch (error) {
-                // Check if this is a rate limit or API key related error
-                const isRetryableError = this._isRetryableError(error);
-                const triedAllKeys = this.apiKeyManager.hasTriedAllKeys();
-                
-                console.log(`Gemini error analysis:`, {
-                    errorMessage: error.message,
-                    isRetryableError,
-                    triedAllKeys,
-                    currentKeyIndex: this.apiKeyManager.currentIndex,
-                    totalKeys: this.apiKeyManager.keys.length,
-                    triedKeysCount: this.apiKeyManager.triedKeys.size
-                });
-                
-                if (isRetryableError && !triedAllKeys) {
-                    console.warn(`Gemini API error with current key (index ${this.apiKeyManager.currentIndex}): ${error.message}. Trying next key...`);
-                    this.apiKeyManager.rotateKey();
-                    console.log(`Rotated to key index: ${this.apiKeyManager.currentIndex}`);
-                    continue; // Try with next key
-                } else {
-                    // Either not a retryable error, or we've tried all keys
-                    if (triedAllKeys) {
-                        console.error(`All ${this.apiKeyManager.keys.length} Gemini API keys have been tried. Giving up.`);
-                    }
-                    throw error;
-                }
-            }
+        const currentApiKey = this.apiKeyManager.getCurrentKey();
+        if (!currentApiKey) {
+            throw new Error("Gemini API key is not set or available.");
         }
+
+        const systemInstruction = this._extractSystemInstruction(history, customRules);
+
+        const genAI = new GoogleGenerativeAI(currentApiKey);
+
+        const model = genAI.getGenerativeModel({
+            model: this.model,
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            tools: [ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition)],
+        });
+
+        const preparedHistory = this._prepareMessages(history);
+        console.log('Gemini prepared history:', JSON.stringify(preparedHistory, null, 2));
+
+        const chat = model.startChat({
+            history: preparedHistory,
+            safetySettings: [
+                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+            ],
+        });
+
+        const lastUserMessage = history[history.length - 1].parts;
+        console.log('Gemini last user message:', JSON.stringify(lastUserMessage, null, 2));
+
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Request timed out after 5 minutes")), 300000)
+        );
+        const abortPromise = abortSignal ? new Promise((_, reject) => {
+            if (abortSignal.aborted) {
+                reject(new Error('Request aborted'));
+            } else {
+                abortSignal.addEventListener('abort', () => reject(new Error('Request aborted')), { once: true });
+            }
+        }) : null;
+
+        const raceArray = [chat.sendMessageStream(lastUserMessage), timeoutPromise];
+        if (abortPromise) raceArray.push(abortPromise);
+        const result = await Promise.race(raceArray);
+
+        try {
+            for await (const chunk of result.stream) {
+                yield {
+                    text: chunk.text(),
+                    functionCalls: chunk.functionCalls(),
+                    usageMetadata: chunk.usageMetadata,
+                };
+            }
+        } catch (streamError) {
+            console.error('Gemini streaming error:', streamError);
+            console.error('Stream error details:', {
+                message: streamError.message,
+                stack: streamError.stack,
+                name: streamError.name
+            });
+            // Re-throw as a retriable error so centralized RetryPolicy/KeyRotation can handle it
+            const retriableError = new Error(`Stream error: ${streamError.message}`);
+            retriableError.originalError = streamError;
+            throw retriableError;
+        }
+
+        // Success: rotation/backoff handled by BaseLLMService (no provider-level rotation here)
+        return;
     }
 
     _isRetryableError(error) {
@@ -156,10 +130,26 @@ export class GeminiService extends BaseLLMService {
         return false;
     }
 
+    _extractSystemInstruction(history, customRules) {
+        const sysTurn = history.find(t => t.role === 'system');
+        let text = '';
+        if (sysTurn && Array.isArray(sysTurn.parts)) {
+            text = sysTurn.parts.map(p => p.text).filter(Boolean).join('\n');
+        }
+        if (!text) {
+            try {
+                text = this._getSystemInstruction('code', customRules);
+            } catch (_) {
+                text = customRules || '';
+            }
+        }
+        return text;
+    }
+
     _prepareMessages(history) {
         // Gemini's chat history doesn't include the final message, which is sent to sendMessage.
         const messages = [];
-        const historyToProcess = history.slice(0, -1);
+        const historyToProcess = history.slice(0, -1).filter(t => t.role !== 'system');
 
         for (const turn of historyToProcess) {
             if (turn.role === 'user') {
@@ -405,5 +395,25 @@ Current context:
         }
         
         return systemInstructionText;
+    }
+
+    // Provider metadata and key
+    getProviderKey() {
+        return 'gemini';
+    }
+
+    getCapabilities() {
+        return {
+            provider: 'gemini',
+            supportsFunctionCalling: true,
+            supportsSystemInstruction: true,
+            nativeToolProtocol: 'gemini_tools',
+            maxContext: 1000000,
+            maxTokens: this.providerConfig?.maxTokens ?? 8192,
+            rateLimits: {
+                requestsPerMinute: this.options?.rateLimit?.requestsPerMinute ?? 1500,
+                tokensPerMinute: this.options?.rateLimit?.tokensPerMinute ?? null
+            }
+        };
     }
 }
