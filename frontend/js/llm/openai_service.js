@@ -58,17 +58,18 @@ export class OpenAIService extends BaseLLMService {
                         stream: true
                     };
                     // Optional generation params only when explicitly set
-                    if (typeof this.providerConfig?.temperature === 'number') payload.temperature = this.providerConfig.temperature;
-                    if (typeof this.providerConfig?.topP === 'number') payload.top_p = this.providerConfig.topP;
+                    const __modelName = String(this.model || '');
+                    const __isReasoning = /^o/i.test(__modelName) || /reasoning/i.test(__modelName);
+                    // By default, omit sampling params for maximum compatibility with modern models.
+                    // Advanced users can opt-in via providerConfig.forceSampling = true (non-reasoning models only).
+                    const __allowSampling = this.providerConfig?.forceSampling === true && !__isReasoning;
+                    if (__allowSampling) {
+                        if (typeof this.providerConfig?.temperature === 'number') payload.temperature = this.providerConfig.temperature;
+                        if (typeof this.providerConfig?.topP === 'number') payload.top_p = this.providerConfig.topP;
+                    }
                     if (typeof this.providerConfig?.maxTokens === 'number') {
-                        const modelName = String(this.model || '');
-                        // Newer OpenAI Chat Completions models (gpt-4o*, gpt-4.1*, o*) require max_completion_tokens
-                        const useMaxCompletion = /^(gpt-4o|gpt-4\.1|o\d)/i.test(modelName);
-                        if (useMaxCompletion) {
-                            payload.max_completion_tokens = this.providerConfig.maxTokens;
-                        } else {
-                            payload.max_tokens = this.providerConfig.maxTokens;
-                        }
+                        // Use the modern Chat Completions parameter to avoid 400s on newer models
+                        payload.max_completion_tokens = this.providerConfig.maxTokens;
                     }
                     // Only include tool_choice if tools are present to avoid OpenAI 400 errors
                     if (tools) {
@@ -215,7 +216,6 @@ export class OpenAIService extends BaseLLMService {
                             messages.push({
                                 role: 'tool',
                                 tool_call_id: toolCallId,
-                                name: responsePart.functionResponse.name,
                                 content: JSON.stringify(responsePart.functionResponse.response),
                             });
                             pendingToolCalls.delete(toolCallId);
