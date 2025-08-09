@@ -818,9 +818,13 @@ async function _createFile({ filename, content = '' }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
+        await UI.refreshFileTree(rootHandle, async (filePath) => {
+            try {
+                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
+                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
+            } catch (e) {
+                console.warn(`Failed to open ${filePath} after refresh:`, e);
+            }
         });
         await Editor.openFile(fileHandle, filename, document.getElementById('tab-bar'), false);
         document.getElementById('chat-input').focus();
@@ -906,9 +910,13 @@ async function _deleteFile({ filename }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
+        await UI.refreshFileTree(rootHandle, async (filePath) => {
+            try {
+                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
+                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
+            } catch (e) {
+                console.warn(`Failed to open ${filePath} after refresh:`, e);
+            }
         });
         
         return { message: `File '${filename}' deleted successfully.` };
@@ -941,9 +949,13 @@ async function _renameFile({ old_path, new_path }, rootHandle) {
 
         // Refresh the file tree so UI reflects the rename
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandlePromise = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            fileHandlePromise.then(fh => Editor.openFile(fh, filePath, document.getElementById('tab-bar'), false)).catch(() => {});
+        await UI.refreshFileTree(rootHandle, async (filePath) => {
+            try {
+                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
+                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'), false);
+            } catch (e) {
+                console.warn(`Failed to open ${filePath} after refresh:`, e);
+            }
         });
 
         return { message: `File '${old_path}' renamed to '${new_path}' successfully.` };
@@ -1679,9 +1691,13 @@ async function _createFolder({ folder_path }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
+        await UI.refreshFileTree(rootHandle, async (filePath) => {
+            try {
+                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
+                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
+            } catch (e) {
+                console.warn(`Failed to open ${filePath} after refresh:`, e);
+            }
         });
         
         return { message: `Folder '${folder_path}' created successfully.` };
@@ -1708,9 +1724,13 @@ async function _deleteFolder({ folder_path }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
+        await UI.refreshFileTree(rootHandle, async (filePath) => {
+            try {
+                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
+                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
+            } catch (e) {
+                console.warn(`Failed to open ${filePath} after refresh:`, e);
+            }
         });
         
         return { message: `Folder '${folder_path}' deleted successfully.` };
@@ -1753,9 +1773,13 @@ async function _renameFolder({ old_folder_path, new_folder_path }, rootHandle) {
         
         // Use more reliable refresh timing
         await new Promise(resolve => setTimeout(resolve, 150));
-        await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
+        await UI.refreshFileTree(rootHandle, async (filePath) => {
+            try {
+                const fh = await FileSystem.getFileHandleFromPath(rootHandle, filePath);
+                await Editor.openFile(fh, filePath, document.getElementById('tab-bar'));
+            } catch (e) {
+                console.warn(`Failed to open ${filePath} after refresh:`, e);
+            }
         });
         
         return { message: `Folder '${old_folder_path}' renamed to '${new_folder_path}' successfully.` };
