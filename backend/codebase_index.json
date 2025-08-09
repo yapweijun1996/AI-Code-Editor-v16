@@ -342,10 +342,6 @@
     "_taskBreakdown",
     "_taskGetNext"
   ],
-  "frontend/js/tools/web_research_tools.js": [
-    "_readUrl",
-    "_duckduckgoSearch"
-  ],
   "frontend/js/tools/editor_tools.js": [
     "stripMarkdownCodeBlock",
     "_getOpenFileContent",

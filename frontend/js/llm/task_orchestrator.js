@@ -11,6 +11,8 @@ import { taskManager } from '../task_manager.js';
 import * as UI from '../ui.js';
 import { DbManager } from '../db.js';
 import { TaskStateManager } from '../task_state_manager.js';
+import { OutputEvaluator } from './output_evaluator.js';
+import { SubjectExtractor } from './subject_extractor.js';
 
 export const TaskOrchestrator = {
   /**
@@ -52,12 +54,33 @@ export const TaskOrchestrator = {
     let nextTask = taskManager.getNextTask();
     let executionAttempts = 0;
     const maxExecutionAttempts = 10;
+    let lastExecutedTaskId = null;
+    let stallCounter = 0;
+    const maxStalls = 3;
 
     while (nextTask && !chatService.isCancelled && executionAttempts < maxExecutionAttempts) {
-      executionAttempts++;
-      UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
-      await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
-      try { tsm.setSubtaskStatus(nextTask.id, 'in_progress'); } catch (e) { console.warn('[TaskOrchestrator] State update (in_progress) failed:', e.message); }
+        executionAttempts++;
+
+        // --- Stall Detection ---
+        if (lastExecutedTaskId === nextTask.id) {
+            stallCounter++;
+        } else {
+            stallCounter = 0;
+        }
+        lastExecutedTaskId = nextTask.id;
+
+        if (stallCounter >= maxStalls) {
+            UI.appendMessage(chatMessages, `Execution stalled: Task "${nextTask.title}" was repeated without progress. Forcing failure to encourage a new approach.`, 'ai');
+            await taskManager.updateTask(nextTask.id, { status: 'failed', results: { reason: 'execution_stalled', timestamp: Date.now() } });
+            try { tsm.setSubtaskStatus(nextTask.id, 'failed', { note: 'Execution stalled' }); } catch (e) { console.warn('[TaskOrchestrator] State update (stalled) failed:', e.message); }
+            nextTask = taskManager.getNextTask();
+            continue; // Skip to the next iteration
+        }
+        // --- End Stall Detection ---
+
+        UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
+        await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
+        try { tsm.setSubtaskStatus(nextTask.id, 'in_progress'); } catch (e) { console.warn('[TaskOrchestrator] State update (in_progress) failed:', e.message); }
 
       const contextInfo = chatService._buildTaskContext(nextTask);
       const rawHints = TaskOrchestrator._buildToolHints(nextTask);
@@ -106,14 +129,76 @@ Stop when the work is finished.`;
         const startTime = Date.now();
         await chatService._performApiCall(ephemeralHistory, chatMessages, { singleTurn: false, promptContext });
         const endTime = Date.now();
+
+        // Refresh task state after model/tool calls
         const updatedTask = taskManager.tasks.get(nextTask.id);
+
+        // Determine whether this subtask actually produced reusable outputs
+        const { producedValue, nextStepHint } = OutputEvaluator.evaluate(updatedTask);
+
+        // Only auto-complete if tangible outputs exist or the tool explicitly set status
         if (updatedTask && updatedTask.status === 'in_progress') {
-          await taskManager.updateTask(nextTask.id, {
-            status: 'completed',
-            results: { completedAutomatically: true, timestamp: Date.now(), executionTime: endTime - startTime }
-          });
-          try { tsm.setSubtaskStatus(nextTask.id, 'completed', { results: { completedAutomatically: true, executionTime: endTime - startTime } }); } catch (e) { console.warn('[TaskOrchestrator] State update (completed) failed:', e.message); }
-          executionResult = { success: true, executionTime: endTime - startTime };
+          if (producedValue) {
+            await taskManager.updateTask(nextTask.id, {
+              status: 'completed',
+              results: {
+                ...(updatedTask.results || {}),
+                completedAutomatically: true,
+                timestamp: Date.now(),
+                executionTime: endTime - startTime
+              }
+            });
+            try { tsm.setSubtaskStatus(nextTask.id, 'completed', { results: { completedAutomatically: true, executionTime: endTime - startTime } }); } catch (e) { console.warn('[TaskOrchestrator] State update (completed) failed:', e.message); }
+            executionResult = { success: true, executionTime: endTime - startTime, producedValue: true };
+          } else {
+            // No tangible outputs produced; do not claim completion
+            await taskManager.updateTask(nextTask.id, {
+              status: 'pending',
+              results: {
+                ...(updatedTask.results || {}),
+                needsMoreInfo: true,
+                reason: 'no_artifacts_or_summary',
+                timestamp: Date.now()
+              },
+              context: {
+                ...updatedTask.context,
+                reuseHint: 'Check Available Artifacts first; only call tools to fill specific gaps.'
+              }
+            });
+            try { tsm.setSubtaskStatus(nextTask.id, 'pending', { note: 'No tangible outputs produced; will re-queue' }); } catch (e) { console.warn('[TaskOrchestrator] State update (pending) failed:', e.message); }
+            executionResult = { success: false, producedValue: false, reason: 'no_outputs' };
+
+            // Auto-advance: if this subtask is an inventory/inspection and produced no outputs,
+            // enqueue a targeted web research subtask (once) to avoid repeated inventory loops.
+            try {
+              const isInventoryTask = /(^|\s)(inventory|inspect|audit)(\s|$)/i.test(nextTask.title || '') || (nextTask.tags || []).includes('inventory');
+              if (isInventoryTask && nextStepHint !== 'proceed') {
+                const mainTaskContext = taskManager.tasks.get(mainTask.id)?.context || {};
+                
+                if (!mainTaskContext.autoQueuedWebResearch) {
+                  const subject = SubjectExtractor.extract(mainTask.title);
+                  if (subject) {
+                    const researchTask = await taskManager.createTask({
+                      title: `Perform targeted web research for "${subject}"`,
+                      description: `The initial local inventory check for "${nextTask.title}" found no relevant artifacts. This task is to perform a web search to find external information, profiles, or repositories related to the main goal.`,
+                      priority: 'high',
+                      parentId: mainTask.id,
+                      listId: mainTask.listId,
+                      tags: ['auto', 'web_research']
+                    });
+                    
+                    await taskManager.updateTask(mainTask.id, {
+                      context: { ...mainTaskContext, autoQueuedWebResearch: true }
+                    });
+
+                    UI.appendMessage(chatMessages, `Queued new subtask: "${researchTask.title}"`, 'ai');
+                  }
+                }
+              }
+            } catch (autoQueueErr) {
+              console.warn('[TaskOrchestrator] Auto-queue web research failed:', autoQueueErr?.message || autoQueueErr);
+            }
+          }
         } else {
           executionResult = {
             success: updatedTask?.status === 'completed',
@@ -163,48 +248,51 @@ Stop when the work is finished.`;
     }
 
     if (executionAttempts >= maxExecutionAttempts) {
-      UI.appendMessage(chatMessages, 'Execution stopped: Maximum attempts reached.', 'ai');
-    }
-
-    if (chatService.isCancelled) {
-      UI.appendMessage(chatMessages, 'Execution cancelled by user.', 'ai');
-      await taskManager.updateTask(mainTask.id, { status: 'failed', results: { cancelled: true, timestamp: Date.now() } });
+        UI.appendMessage(chatMessages, 'Execution stopped: Maximum attempts reached.', 'ai');
+        await taskManager.updateTask(mainTask.id, {
+            status: 'failed',
+            results: { reason: 'max_attempts_reached', timestamp: Date.now() }
+        });
+    } else if (chatService.isCancelled) {
+        UI.appendMessage(chatMessages, 'Execution cancelled by user.', 'ai');
+        await taskManager.updateTask(mainTask.id, { status: 'failed', results: { cancelled: true, timestamp: Date.now() } });
     } else {
-      const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
-      const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
-      const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
+        const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
+        const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
+        const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
 
-      // Finalize state tracking and add execution summary note
-      try {
-        const summary = tsm.finalize();
-        await taskManager.addNote(
-          mainTask.id,
-          `Execution summary: completed=${summary.metrics.completed}, failed=${summary.metrics.failed}, attempts=${summary.metrics.totalAttempts}`,
-          'system'
-        );
-      } catch (e) {
-        console.warn('[TaskOrchestrator] Could not add execution summary note:', e.message);
-      }
+        // Finalize state tracking and add execution summary note
+        try {
+            const summary = tsm.finalize();
+            await taskManager.addNote(
+                mainTask.id,
+                `Execution summary: completed=${summary.metrics.completed}, failed=${summary.metrics.failed}, attempts=${summary.metrics.totalAttempts}`,
+                'system'
+            );
+        } catch (e) {
+            console.warn('[TaskOrchestrator] Could not add execution summary note:', e.message);
+        }
 
-      if (allSubtasks.length === 0) {
-        await taskManager.updateTask(mainTask.id, {
-          status: 'failed',
-          results: { reason: 'no_subtasks_planned', timestamp: Date.now() }
-        });
-        UI.appendMessage(chatMessages, `Main task "${mainTask.title}" could not proceed: no subtasks were planned. A fallback breakdown will be used next time to prevent this.`, 'ai');
-      } else if (failedSubtasks.length > 0) {
-        await taskManager.updateTask(mainTask.id, {
-          status: 'failed',
-          results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() }
-        });
-        UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');
-      } else {
-        await taskManager.updateTask(mainTask.id, {
-          status: 'completed',
-          results: { completedSubtasks: completedSubtasks.length, timestamp: Date.now() }
-        });
-        UI.appendMessage(chatMessages, `Main task "${mainTask.title}" completed successfully! All ${completedSubtasks.length} subtasks finished.`, 'ai');
-      }
+        if (allSubtasks.length === 0) {
+            await taskManager.updateTask(mainTask.id, {
+                status: 'failed',
+                results: { reason: 'no_subtasks_planned', timestamp: Date.now() }
+            });
+            UI.appendMessage(chatMessages, `Main task "${mainTask.title}" could not proceed: no subtasks were planned. A fallback breakdown will be used next time to prevent this.`, 'ai');
+        } else if (failedSubtasks.length > 0 || completedSubtasks.length === 0) {
+            // If any subtask failed OR if no subtasks were completed, the main task has failed.
+            await taskManager.updateTask(mainTask.id, {
+                status: 'failed',
+                results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() }
+            });
+            UI.appendMessage(chatMessages, `Main task "${mainTask.title}" failed. ${completedSubtasks.length}/${allSubtasks.length} subtasks completed.`, 'ai');
+        } else {
+            await taskManager.updateTask(mainTask.id, {
+                status: 'completed',
+                results: { completedSubtasks: completedSubtasks.length, timestamp: Date.now() }
+            });
+            UI.appendMessage(chatMessages, `Main task "${mainTask.title}" completed successfully! All ${completedSubtasks.length} subtasks finished.`, 'ai');
+        }
     }
 
     await DbManager.saveChatHistory(chatService.currentHistory);

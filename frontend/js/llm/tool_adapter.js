@@ -8,6 +8,68 @@
  */
 export const ToolAdapter = {
   /**
+   * Normalize and enrich tool call parameters, especially for high-frequency tools
+   * that are prone to LLM errors (e.g., missing required params).
+   *
+   * @param {string} toolName - The name of the tool being called.
+   * @param {object} originalArgs - The arguments provided by the LLM.
+   * @param {object} taskContext - The full context of the current task, including `title` and `description`.
+   * @returns {object} The normalized and enriched arguments.
+   */
+  normalizeParameters(toolName, originalArgs, taskContext = {}) {
+    const args = { ...originalArgs };
+
+    if (toolName === 'perform_research') {
+      // Case 1: `query` is missing, but other valid keys exist.
+      if (!args.query) {
+        const querySource = args.handle || args.topic || args.subject || args.name;
+        if (querySource) {
+          args.query = querySource;
+        }
+      }
+
+      // Case 2: `query` is still missing, infer from task title.
+      if (!args.query) {
+        const title = taskContext.title || '';
+        const quotedMatch = title.match(/"([^"]+)"/); // "research for 'foo'" -> foo
+        if (quotedMatch && quotedMatch[1]) {
+          args.query = quotedMatch[1];
+        } else {
+          // Fallback: use the whole title if no quotes are found.
+          args.query = title.replace(/^(Perform targeted web research for|research)\s*/i, '').trim();
+        }
+      }
+
+      // Case 3: Normalize common alternative parameter names.
+      // Pass 'queries' array through directly; the tool now handles it.
+      // The join logic is lossy and has been removed.
+      if (args.queries && Array.isArray(args.queries) && !args.query) {
+        // If a single query is still needed for older contexts, use the first.
+        // But prioritize keeping the array.
+        args.query = args.queries[0];
+      }
+      if (args.max_results) {
+        args.maxResults = args.max_results;
+        delete args.max_results;
+      }
+      if (args.follow_links) {
+        args.followLinks = args.follow_links;
+        delete args.follow_links;
+      }
+       if (args.include_full_text) {
+        args.includeFullText = args.include_full_text;
+        delete args.include_full_text;
+      }
+      if (args.platforms) {
+        args.sites = args.platforms;
+        delete args.platforms;
+      }
+    }
+
+    return args;
+  },
+
+  /**
    * Normalize provider-emitted tool call events into a common array of
    * { id, name, args } objects.
    *

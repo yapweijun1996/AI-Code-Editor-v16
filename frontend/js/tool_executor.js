@@ -4,6 +4,7 @@ import * as UI from './ui.js';
 import { toolLogger } from './tool_logger.js';
 import { performanceOptimizer } from './performance_optimizer.js';
 import { ToolRegistry } from './tool_registry.js';
+import { taskManager } from './task_manager.js';
 
 // Smart debugging and optimization state
 const debuggingState = {
@@ -130,6 +131,11 @@ function _normalizeParameters(toolName, rawParams = {}, toolDef = null) {
             if (!params.new_folder_path && typeof params.to === 'string') {
                 params.new_folder_path = params.to;
                 delete params.to;
+            }
+        } else if (name === 'perform_research') {
+            // If 'queries' is provided but 'query' is missing, use the first query from the array.
+            if (!params.query && Array.isArray(params.queries) && params.queries.length > 0) {
+                params.query = params.queries[0];
             }
         }
 
@@ -344,6 +350,110 @@ function setCachedResult(toolName, parameters, result) {
         const oldestKey = Array.from(debuggingState.contextCache.keys())[0];
         debuggingState.contextCache.delete(oldestKey);
     }
+    
+    /**
+     * Infer artifacts and summary from an arbitrary tool result.
+     * Returns { summary?: string, artifacts: Array<{kind,name,url,title}> }
+     */
+    function _inferArtifactsAndSummary(toolName, result) {
+        const artifacts = [];
+        let summary = null;
+    
+        const pushFile = (name, title) => {
+            if (typeof name === 'string' && name.trim()) {
+                artifacts.push({ kind: 'file', name: name.trim(), title });
+            }
+        };
+        const pushUrl = (url, title) => {
+            if (typeof url === 'string' && url.trim()) {
+                artifacts.push({ kind: 'url', url: url.trim(), title });
+            }
+        };
+        const pushNamed = (name, title) => {
+            if (typeof name === 'string' && name.trim()) {
+                artifacts.push({ kind: 'named_resource', name: name.trim(), title });
+            }
+        };
+    
+        try {
+            // Common shapes
+            if (result && typeof result === 'object') {
+                // Direct filename
+                if (typeof result.filename === 'string') pushFile(result.filename, result.title);
+                // Direct url
+                if (typeof result.url === 'string') pushUrl(result.url, result.title);
+                // Named resource
+                if (typeof result.name === 'string') pushNamed(result.name, result.title);
+    
+                // Arrays of links/files
+                if (Array.isArray(result.links)) {
+                    for (const L of result.links) {
+                        if (typeof L === 'string') pushUrl(L);
+                        else if (L && typeof L.url === 'string') pushUrl(L.url, L.title || L.text);
+                    }
+                }
+                if (Array.isArray(result.urls)) {
+                    for (const u of result.urls) {
+                        if (typeof u === 'string') pushUrl(u);
+                        else if (u && typeof u.url === 'string') pushUrl(u.url, u.title);
+                    }
+                }
+                if (Array.isArray(result.files)) {
+                    for (const f of result.files) {
+                        if (typeof f === 'string') pushFile(f);
+                        else if (f && typeof f.filename === 'string') pushFile(f.filename, f.title);
+                        else if (f && typeof f.name === 'string') pushFile(f.name, f.title);
+                    }
+                }
+                if (Array.isArray(result.artifacts)) {
+                    for (const a of result.artifacts) {
+                        if (a && typeof a === 'object') {
+                            const kind = a.kind || (a.url ? 'url' : (a.name ? 'file' : 'named_resource'));
+                            if (kind === 'url' && a.url) pushUrl(a.url, a.title);
+                            else if ((kind === 'file' || kind === 'named_resource') && a.name) artifacts.push({ kind, name: a.name, title: a.title });
+                        }
+                    }
+                }
+    
+                // Summary-like fields
+                if (typeof result.summary === 'string' && result.summary.trim()) {
+                    summary = result.summary.trim();
+                } else if (typeof result.overview === 'string' && result.overview.trim()) {
+                    summary = result.overview.trim();
+                } else if (typeof result.content === 'string' && result.content.trim()) {
+                    // Truncate overly long content for summary field
+                    const c = result.content.trim();
+                    summary = c.length > 2000 ? c.slice(0, 2000) : c;
+                } else if (typeof result.text === 'string' && result.text.trim()) {
+                    const c = result.text.trim();
+                    summary = c.length > 2000 ? c.slice(0, 2000) : c;
+                }
+            }
+    
+            // Light heuristics per tool name
+            const name = String(toolName || '').toLowerCase();
+            if (!summary && name.includes('research')) {
+                // A generic hint: if we saw URLs, produce a micro-summary
+                const urlCount = artifacts.filter(a => a.kind === 'url').length;
+                if (urlCount > 0) summary = `Collected ${urlCount} research link(s).`;
+            }
+        } catch (_) {
+            // ignore inference errors
+        }
+    
+        // Deduplicate by (kind,url|name)
+        const seen = new Set();
+        const deduped = [];
+        for (const a of artifacts) {
+            const key = `${a.kind}:${a.url || a.name || ''}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                deduped.push(a);
+            }
+        }
+    
+        return { summary: summary || null, artifacts: deduped };
+    }
 }
 
 // --- Core Execution Logic ---
@@ -453,6 +563,30 @@ export async function execute(toolCall, rootDirectoryHandle, silent = false) {
         
         toolLogger.log(toolName, normalizedArgs, 'Success', resultForModel);
         
+        // Persist standardized artifacts/summary into the active task context so subsequent subtasks can reuse them.
+        try {
+            // Only record when there's meaningful content to share
+            const inferred = _inferArtifactsAndSummary(toolName, resultForModel);
+            const hasMeaningful =
+                (inferred.summary && inferred.summary.length > 0) ||
+                (Array.isArray(inferred.artifacts) && inferred.artifacts.length > 0);
+
+            // Avoid spamming context for purely read operations unless they yield named outputs
+            const isPureRead = ['read_file', 'read_file_lines', 'search_in_file', 'get_project_structure'].includes(toolName);
+
+            if (hasMeaningful && (!isPureRead || inferred.artifacts.length > 0)) {
+                await taskManager.recordToolResult('active', {
+                    toolName,
+                    args: normalizedArgs,
+                    summary: inferred.summary || undefined,
+                    artifacts: inferred.artifacts || [],
+                    rawResult: resultForModel
+                });
+            }
+        } catch (persistErr) {
+            console.warn('[ToolExecutor] Failed to persist tool result to task context:', persistErr?.message || persistErr);
+        }
+
         if (executionTime > 2000) {
             console.warn(`[Performance] Tool ${toolName} took ${executionTime}ms - consider optimization`);
         }
@@ -462,6 +596,64 @@ export async function execute(toolCall, rootDirectoryHandle, silent = false) {
         const endTime = performance.now();
         
         trackToolPerformance(toolName, startTime, endTime, false, context);
+
+        // Attempt to salvage and persist any partial results from the failed tool call
+        let partialSaved = false;
+        try {
+            const candidates = [];
+            if (error && typeof error === 'object') {
+                if (error.partialResult) candidates.push(error.partialResult);
+                if (error.partial) candidates.push(error.partial);
+                if (error.result) candidates.push(error.result);
+                if (error.data && error.data.partialResult) candidates.push(error.data.partialResult);
+
+                // If the error object itself resembles a result shape, treat selected fields as a candidate
+                const looksLikeResult =
+                    Array.isArray(error.links) ||
+                    Array.isArray(error.urls) ||
+                    Array.isArray(error.files) ||
+                    typeof error.filename === 'string' ||
+                    typeof error.url === 'string' ||
+                    typeof error.name === 'string';
+                if (looksLikeResult) {
+                    candidates.push({
+                        links: error.links,
+                        urls: error.urls,
+                        files: error.files,
+                        filename: error.filename,
+                        url: error.url,
+                        name: error.name,
+                        summary: typeof error.summary === 'string' ? error.summary : undefined
+                    });
+                }
+            }
+
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                const inferred = _inferArtifactsAndSummary(toolName, candidate);
+                const hasMeaningful =
+                    (inferred.summary && inferred.summary.length > 0) ||
+                    (Array.isArray(inferred.artifacts) && inferred.artifacts.length > 0);
+
+                // Avoid spamming context for purely read operations unless they yield named outputs
+                const isPureRead = ['read_file', 'read_file_lines', 'search_in_file', 'get_project_structure'].includes(toolName);
+
+                if (hasMeaningful && (!isPureRead || (inferred.artifacts && inferred.artifacts.length > 0))) {
+                    await taskManager.recordToolResult('active', {
+                        toolName,
+                        args: normalizedArgs,
+                        summary: inferred.summary ? `[Partial] ${inferred.summary}` : undefined,
+                        artifacts: inferred.artifacts || [],
+                        rawResult: { partial: candidate, error: String(error?.message || error) }
+                    });
+                    partialSaved = true;
+                    console.warn(`[ToolExecutor] Saved partial results for failed tool '${toolName}'.`);
+                    break; // save the first meaningful partial
+                }
+            }
+        } catch (persistErr) {
+            console.warn('[ToolExecutor] Failed to persist partial results from error:', persistErr?.message || persistErr);
+        }
         
         const errorAnalysis = analyzeError(toolName, error, context);
         let errorMessage = `Error executing tool '${toolName}': ${error.message}`;
@@ -471,6 +663,10 @@ export async function execute(toolCall, rootDirectoryHandle, silent = false) {
             if (errorAnalysis.alternativeTool) {
                 errorMessage += `\nConsider using: ${errorAnalysis.alternativeTool}`;
             }
+        }
+
+        if (partialSaved) {
+            errorMessage += `\n\nNote: Partial results were saved to the task context and can be reused by subsequent steps.`;
         }
         
         resultForModel = { error: errorMessage };

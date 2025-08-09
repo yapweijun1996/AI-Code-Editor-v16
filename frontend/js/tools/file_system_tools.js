@@ -33,9 +33,11 @@ function unescapeHtmlEntities(text) {
 }
 
 async function _getProjectStructure(params, rootHandle) {
+    console.log(`[get_project_structure] Getting structure for root: ${rootHandle.name}`);
     const ignorePatterns = await FileSystem.getIgnorePatterns(rootHandle);
     const tree = await FileSystem.buildStructureTree(rootHandle, ignorePatterns);
     const structure = FileSystem.formatTreeToString(tree);
+    console.log(`[get_project_structure] Structure retrieved. Root: ${rootHandle.name}, First level entries: ${tree.children.length}`);
     return { structure };
 }
 

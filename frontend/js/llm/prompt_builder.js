@@ -99,13 +99,23 @@ export const PromptBuilder = {
     // Compose optional slots with hard caps
     const slotText = this._composeSlots(context.slots || {}, caps);
 
+    // Hard rule to enforce reuse-before-tools behavior across all modes
+    const reusePolicy = [
+      '# Reuse Policy',
+      '- Before invoking any tool, first inspect "Available Artifacts" in the Context.',
+      '- If the artifacts contain sufficient information to complete the task, synthesize directly and DO NOT call tools.',
+      '- Only call tools when information is missing or insufficient. If you call a tool, briefly justify what is missing.',
+      '- Prefer targeted, low-cost tools over broad or duplicate operations.'
+    ].join('\\n');
+    
     // Assemble system prompt body (subject to system cap)
     let body = [
       baseHeader,
       '',
       (modeBlocks[mode] || modeBlocks.code),
-      slotText ? `\n# Context\n${slotText}` : ''
-    ].join('\n');
+      reusePolicy,
+      slotText ? `\\n# Context\\n${slotText}` : ''
+    ].join('\\n');
 
     body = this._cap(body, caps.system);
 

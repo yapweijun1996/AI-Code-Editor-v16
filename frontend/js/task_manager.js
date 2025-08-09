@@ -1583,6 +1583,155 @@ TaskManager.prototype.buildPromptContext = function (taskOrId, options = {}) {
     return result;
 };
 
+/**
+ * Persist a tool/LLM step's outputs into a task's results and shared context,
+ * enabling subsequent subtasks to reuse artifacts (files, URLs, named resources) and summaries.
+ * payload shape:
+ *   {
+ *     toolName?: string,
+ *     args?: object,
+ *     summary?: string,
+ *     artifacts?: Array<{ kind?: 'url'|'file'|'named_resource'|'blob', url?: string, name?: string, title?: string }>,
+ *     rawResult?: any
+ *   }
+ */
+TaskManager.prototype.recordToolResult = async function(taskIdOrActive, payload = {}) {
+    try {
+        const taskId = taskIdOrActive && taskIdOrActive !== 'active'
+            ? taskIdOrActive
+            : (this.activeTask || null);
+
+        if (!taskId) {
+            console.warn('[TaskManager.recordToolResult] No active task to attach results to.');
+            return { saved: false, reason: 'no_active_task' };
+        }
+
+        const task = this.tasks.get(taskId);
+        if (!task) {
+            console.warn('[TaskManager.recordToolResult] Task not found:', taskId);
+            return { saved: false, reason: 'task_not_found' };
+        }
+
+        // Ensure results and context structures
+        if (!task.results || typeof task.results !== 'object') {
+            task.results = { artifacts: [], summary: null };
+        }
+        if (!Array.isArray(task.results.artifacts)) {
+            task.results.artifacts = [];
+        }
+        if (!task.context || typeof task.context !== 'object') {
+            task.context = {};
+        }
+        if (!Array.isArray(task.context.sharedArtifacts)) {
+            task.context.sharedArtifacts = [];
+        }
+
+        const sourceTaskId = task.id;
+
+        // Normalize artifacts
+        const incomingArtifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+        const normalizedArtifacts = incomingArtifacts
+            .map(a => this._normalizeArtifact(a, sourceTaskId))
+            .filter(Boolean);
+
+        // If caller only passed rawResult but it obviously contains a single file or URL,
+        // attempt to auto-normalize into an artifact to avoid losing useful context.
+        if (normalizedArtifacts.length === 0 && payload.rawResult && typeof payload.rawResult === 'object') {
+            const r = payload.rawResult;
+            if (typeof r.filename === 'string') {
+                normalizedArtifacts.push(this._normalizeArtifact({ kind: 'file', name: r.filename }, sourceTaskId));
+            } else if (typeof r.url === 'string') {
+                normalizedArtifacts.push(this._normalizeArtifact({ kind: 'url', url: r.url }, sourceTaskId));
+            } else if (typeof r.name === 'string') {
+                normalizedArtifacts.push(this._normalizeArtifact({ kind: 'named_resource', name: r.name }, sourceTaskId));
+            }
+        }
+
+        // Merge artifacts into task.results.artifacts (dedup)
+        const mergedArtifacts = this._dedupeArtifacts([...(task.results.artifacts || []), ...normalizedArtifacts]);
+        task.results.artifacts = mergedArtifacts;
+
+        // Also merge a simplified copy into sharedArtifacts so siblings can discover them
+        const sharedCopies = normalizedArtifacts.map(a => ({
+            kind: a.kind,
+            url: a.url,
+            name: a.name,
+            title: a.title,
+            sourceTaskId
+        }));
+        task.context.sharedArtifacts = this._dedupeArtifacts([...(task.context.sharedArtifacts || []), ...sharedCopies]);
+
+        // Update summary if provided (prefer explicit payload.summary; otherwise infer common fields)
+        const inferredSummary =
+            payload.summary ||
+            (typeof payload.rawResult?.summary === 'string' ? payload.rawResult.summary : null) ||
+            (typeof payload.rawResult?.content === 'string' ? payload.rawResult.content.slice(0, 2000) : null);
+
+        if (inferredSummary && (!task.results.summary || String(inferredSummary).length > String(task.results.summary).length)) {
+            task.results.summary = String(inferredSummary);
+        }
+
+        // Optionally store a light trace for provenance
+        const traceNote = {
+            id: `note_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            content: `[artifact-recorded] ${payload.toolName ? `tool=${payload.toolName}` : ''}${payload.summary ? ' • summary_updated' : ''}${normalizedArtifacts.length ? ` • artifacts=${normalizedArtifacts.length}` : ''}`,
+            type: 'system',
+            timestamp: Date.now()
+        };
+        task.notes = Array.isArray(task.notes) ? task.notes : [];
+        task.notes.push(traceNote);
+
+        await this.saveToStorage();
+        this.notifyListeners('task_updated', task);
+
+        return { saved: true, artifactsAdded: normalizedArtifacts.length, summaryUpdated: !!inferredSummary };
+    } catch (e) {
+        console.warn('[TaskManager.recordToolResult] Failed:', e);
+        return { saved: false, reason: 'exception', error: e.message };
+    }
+};
+
+/**
+ * Normalize a raw artifact-like object to a consistent shape.
+ */
+TaskManager.prototype._normalizeArtifact = function(a, sourceTaskId) {
+    try {
+        if (!a || typeof a !== 'object') return null;
+        const kind = a.kind || (a.url ? 'url' : (a.name ? 'file' : 'named_resource'));
+        const out = {
+            kind,
+            url: typeof a.url === 'string' ? a.url : undefined,
+            name: typeof a.name === 'string' ? a.name : undefined,
+            title: typeof a.title === 'string' ? a.title : undefined,
+            sourceTaskId
+        };
+        if (!out.url && !out.name) return null;
+        return out;
+    } catch (_) {
+        return null;
+    }
+};
+
+/**
+ * Deduplicate artifacts by (kind, url|name) key.
+ */
+TaskManager.prototype._dedupeArtifacts = function(list) {
+    try {
+        const seen = new Set();
+        const out = [];
+        for (const a of (Array.isArray(list) ? list : [])) {
+            const key = `${a.kind}:${a.url || a.name || ''}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                out.push(a);
+            }
+        }
+        return out;
+    } catch (_) {
+        return Array.isArray(list) ? list : [];
+    }
+};
+
 export const taskManager = new TaskManager();
 
 // Export convenience methods for tool integration
