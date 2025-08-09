@@ -922,29 +922,30 @@ async function _renameFile({ old_path, new_path }, rootHandle) {
     if (typeof old_path !== 'string' || typeof new_path !== 'string') {
         throw new Error("The 'old_path' and 'new_path' parameters must be strings.");
     }
-    
     try {
+        const wasOpen = Editor.getOpenFiles().has(old_path);
+        // Perform filesystem rename
         await FileSystem.renameEntry(rootHandle, old_path, new_path);
-        
-        // Handle editor state changes
-        if (Editor.getOpenFiles().has(old_path)) {
-            Editor.closeTab(old_path, document.getElementById('tab-bar'));
+
+        if (wasOpen) {
+            // Update editor tab/model id and handle without closing/reopening
+            const newFileHandle = await FileSystem.getFileHandleFromPath(rootHandle, new_path);
+            const newName = new_path.split('/').pop();
+            Editor.updateTabId(old_path, new_path, newName);
+            const openFiles = Editor.getOpenFiles();
+            const newEntry = openFiles.get(new_path);
+            if (newEntry) {
+                newEntry.handle = newFileHandle;
+            }
         }
-        
-        // Use more reliable refresh timing
+
+        // Refresh the file tree so UI reflects the rename
         await new Promise(resolve => setTimeout(resolve, 150));
         await UI.refreshFileTree(rootHandle, (filePath) => {
-            const fileHandle = FileSystem.getFileHandleFromPath(rootHandle, filePath);
-            Editor.openFile(fileHandle, filePath, document.getElementById('tab-bar'));
+            const fileHandlePromise = FileSystem.getFileHandleFromPath(rootHandle, filePath);
+            fileHandlePromise.then(fh => Editor.openFile(fh, filePath, document.getElementById('tab-bar'), false)).catch(() => {});
         });
-        
-        // Reopen file with new name if it was previously open
-        if (Editor.getOpenFiles().has(old_path)) {
-            const newFileHandle = await FileSystem.getFileHandleFromPath(rootHandle, new_path);
-            await Editor.openFile(newFileHandle, new_path, document.getElementById('tab-bar'), false);
-            document.getElementById('chat-input').focus();
-        }
-        
+
         return { message: `File '${old_path}' renamed to '${new_path}' successfully.` };
     } catch (error) {
         throw new Error(`Failed to rename file '${old_path}' to '${new_path}': ${error.message}`);

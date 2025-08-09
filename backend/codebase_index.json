@@ -326,13 +326,15 @@
   "frontend/js/llm/llm_facade.js": [
     "LLMFacade"
   ],
-  "frontend/js/llm/intent_classifier.js": [
-    "buildClassificationPrompt"
-  ],
   "frontend/js/llm/service_factory.js": [
     "LLMServiceFactory"
   ],
   "frontend/js/main.js": [
     "initializeCoreServices"
+  ],
+  "frontend/js/llm/intent_classifier.js": [
+    "buildClassificationPrompt",
+    "buildMultiIntentPrompt",
+    "safeParseJson"
   ]
 }

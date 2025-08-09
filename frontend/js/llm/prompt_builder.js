@@ -28,9 +28,11 @@ export const PromptBuilder = {
       ].join('\n'),
       plan: [
         '# Mode: PLAN',
-        '- Break complex goals into actionable steps.',
-        '- Identify risks, dependencies, and acceptance criteria.',
-        '- Provide a phased plan with measurable milestones.'
+        '- Break complex or multi-intent goals into concrete, executable subtasks.',
+        '- Detect and decompose multi-intent prompts (e.g., setup_tailwind, create_js_files, generate_ideas).',
+        '- For each intent, group subtasks, specify dependencies, and define measurable acceptance criteria.',
+        '- Prefer actions that can be performed via available tools first; if tools are unavailable, add an advisory/info-producing subtask.',
+        '- Output MUST be valid JSON when a strict schema is requested by the user or the system.'
       ].join('\n'),
       search: [
         '# Mode: SEARCH',

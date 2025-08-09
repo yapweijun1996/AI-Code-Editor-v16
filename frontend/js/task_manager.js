@@ -327,20 +327,27 @@ class TaskManager {
         const { ChatService } = await import('./chat_service.js');
         // ChatService is exported as an object, not a class, so use it directly
         
-        const prompt = `You are an expert project manager. Break down this task into specific, actionable subtasks.
+        const prompt = `You are an expert technical project planner. Break down the user's goal into concrete, executable subtasks with clear intent grouping and dependencies.
 
 TASK: "${mainTask.title}"
 DESCRIPTION: "${mainTask.description || 'No additional description provided'}"
 
-REQUIREMENTS:
-1. Create 3-6 specific, actionable subtasks
-2. Each subtask should be concrete and executable
-3. Avoid generic tasks like "analyze requirements" or "plan approach"
-4. Focus on specific actions like "locate CSS files", "update color variables", "test changes"
-5. Estimate time in minutes for each subtask
-6. Set appropriate priority (low, medium, high, urgent)
+PLANNING RULES:
+1) Detect multi-intent prompts and decompose them. Common intents include:
+   - setup_tailwind (e.g., inject Tailwind via CDN if not installed)
+   - create_js_files (e.g., scaffold multiple JS modules/files)
+   - generate_ideas (e.g., produce 10 concrete improvement ideas)
+   - modify_files, search_codebase, bug_fix, refactor, write_tests
+2) Prefer steps that can be executed via repository/file tools (read/search/write/apply_diff).
+3) If a requested action cannot be executed directly (e.g., missing context or unavailable tools), include an "advisory" subtask that produces useful output (e.g., 10 ideas with rationale).
+4) Avoid vague tasks like "analyze requirements". Use specific actions such as:
+   - "Inject Tailwind CDN link into frontend/index.html (head) and add a sample utility class to verify"
+   - "Create JS files under frontend/js/modules/: dom_utils.js, api_client.js, state_store.js with minimal exports"
+   - "Generate 10 concrete improvement ideas with brief justifications"
+5) Each subtask must include: title, description, priority (low|medium|high|urgent), and estimatedTime (minutes).
+6) Produce between 3 and 6 subtasks. Order them with sensible dependencies (first steps unblock later ones).
 
-Return ONLY a valid JSON array of subtasks in this exact format - no markdown, no code blocks, no explanations:
+Return ONLY a valid JSON array in this exact format (no markdown, no code fences, no commentary):
 [
   {
     "title": "Specific actionable task title",
@@ -350,7 +357,10 @@ Return ONLY a valid JSON array of subtasks in this exact format - no markdown, n
   }
 ]
 
-CRITICAL: Your response must start with [ and end with ]. Do not include any text before or after the JSON array.`;
+CRITICAL:
+- Your response must start with [ and end with ].
+- Do not include any text before or after the JSON array.
+- Ensure tasks reflect all detected intents (e.g., Tailwind setup, JS scaffolding, and advisory ideas if requested).`;
 
         try {
             // Send prompt without tools to avoid confusion
@@ -484,14 +494,22 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
      */
     async _fallbackTaskBreakdown(mainTask) {
         console.log('[TaskManager] Using fallback breakdown method');
-        
+
         const contextClues = this._analyzeTaskContext(mainTask);
-        const genericSteps = this._createContextualGenericSteps(mainTask, contextClues);
-        
+
+        // Domain-specific fallback (e.g., Tailwind + JS modules + ideas) before generic steps
+        let steps = this._createDomainSpecificFallbackSteps(mainTask);
+        if (!steps || steps.length === 0) {
+            steps = this._createContextualGenericSteps(mainTask, contextClues);
+        }
+
         const subtasks = [];
         let prevTaskId = null;
-        
-        for (const step of genericSteps) {
+
+        for (const step of steps) {
+            const baseTags = ['ai-generated', 'subtask', 'fallback'];
+            const tags = Array.isArray(step.tags) ? [...baseTags, ...step.tags] : baseTags;
+
             const subtask = await this.createTask({
                 title: step.title,
                 description: step.description || '',
@@ -500,7 +518,7 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                 listId: mainTask.listId,
                 dependencies: prevTaskId ? [prevTaskId] : [],
                 estimatedTime: step.estimatedTime || 30,
-                tags: ['ai-generated', 'subtask', 'fallback'],
+                tags,
                 context: {
                     ...mainTask.context,
                     method: 'fallback',
@@ -511,7 +529,7 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
             subtasks.push(subtask);
             prevTaskId = subtask.id;
         }
-        
+
         return subtasks;
     }
 
@@ -581,6 +599,69 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                 { title: 'Verify completion', priority: 'medium', description: 'Ensure the task was completed successfully', estimatedTime: 10 }
             ];
         }
+    }
+
+    /**
+     * Domain-specific fallback for common multi-intent prompts like:
+     * "use tailwindcss, several .js, list 10 ideas to improve this project"
+     */
+    _createDomainSpecificFallbackSteps(task) {
+        const text = `${task.title} ${task.description || ''}`.toLowerCase();
+        const wantsTailwind =
+            text.includes('tailwind');
+        const wantsJsModules =
+            text.includes('several .js') ||
+            text.includes('multiple js') ||
+            text.includes('create js') ||
+            text.includes('scaffold') ||
+            text.includes('modules');
+        const wantsIdeas =
+            text.includes('idea') ||
+            text.includes('improve') ||
+            text.includes('suggestion') ||
+            text.includes('ideas');
+
+        if (!(wantsTailwind || wantsJsModules || wantsIdeas)) {
+            return null;
+        }
+
+        const steps = [];
+
+        if (wantsTailwind) {
+            steps.push({
+                title: 'Inject Tailwind via CDN in frontend/index.html',
+                description: 'Use read_file with include_line_numbers=true on frontend/index.html, then apply_diff to insert <script src="https://cdn.tailwindcss.com"></script> before </head>. Add a small utility usage (e.g., <div class="p-2 text-sm">Tailwind OK</div>) to verify.',
+                priority: 'high',
+                estimatedTime: 10
+            });
+        }
+
+        if (wantsJsModules) {
+            steps.push({
+                title: 'Create JS modules under frontend/js/modules',
+                description: 'Use create_file to create: frontend/js/modules/dom_utils.js, frontend/js/modules/api_client.js, frontend/js/modules/state_store.js. Each should export at least one function with placeholder implementation and JSDoc.',
+                priority: 'high',
+                estimatedTime: 15
+            });
+            steps.push({
+                title: 'Link JS modules in index.html',
+                description: 'Use read_file with include_line_numbers=true on frontend/index.html, then apply_diff to add <script type="module" src="js/modules/dom_utils.js"></script>, <script type="module" src="js/modules/api_client.js"></script>, and <script type="module" src="js/modules/state_store.js"></script> before </body>.',
+                priority: 'medium',
+                estimatedTime: 10
+            });
+        }
+
+        if (wantsIdeas) {
+            steps.push({
+                title: 'Produce 10 concrete improvement ideas for this project',
+                description: 'Advisory output: actionable enhancements across reliability, UX, performance, and developer experience.',
+                priority: 'medium',
+                estimatedTime: 10,
+                tags: ['advisory']
+            });
+        }
+
+        return steps;
     }
 
     /**

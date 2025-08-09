@@ -279,7 +279,7 @@ export const ChatService = {
     },
 
     async _performApiCall(history, chatMessages, options = {}) {
-        const { singleTurn = false, useTools = true, directAnalysis = false } = options;
+        const { singleTurn = false, useTools = true, directAnalysis = false, overrideMode = null } = options;
         const controller = new AbortController();
         this.currentAbortController = controller;
 
@@ -304,7 +304,7 @@ export const ChatService = {
         while (continueLoop && !this.isCancelled) {
             try {
                 UI.showThinkingIndicator(chatMessages, 'AI is thinking...');
-                const mode = document.getElementById('agent-mode-selector').value;
+                const mode = overrideMode || document.getElementById('agent-mode-selector').value;
                 const customRules = Settings.get(`custom.${mode}.rules`);
                 
                 // Enhanced tool definitions with smart recommendations
@@ -621,6 +621,35 @@ export const ChatService = {
         const history = this.currentHistory || await DbManager.getChatHistory();
         // Ensure we have a facade (created in _initializeLLMService)
         const facade = this.llmFacade || new LLMFacade(this.llmService, Settings.getLLMSettings());
+
+        // Prefer multi-intent classification to robustly route complex prompts
+        try {
+            if (IntentClassifier.classifyMulti) {
+                const multi = await IntentClassifier.classifyMulti({
+                    llmFacade: facade,
+                    userPrompt,
+                    conversationContext,
+                    history
+                });
+
+                const labels = (multi?.intents || []).map(i => i.label);
+                const strongTaskSignals = ['setup_tailwind','create_js_files','modify_files','bug_fix','refactor','write_tests'];
+                const hasStrongTask = labels.some(l => strongTaskSignals.includes(l));
+                const isGenerateIdeas = labels.includes('generate_ideas');
+                const multipleIntents = (labels.length || 0) >= 2;
+
+                if (multi?.primary === 'TASK' || hasStrongTask || (multipleIntents && (hasStrongTask || isGenerateIdeas))) {
+                    return 'TASK\nReason: Multi-intent classification indicates actionable steps';
+                }
+                if (multi?.primary === 'TOOL') {
+                    return 'TOOL\nReason: Multi-intent classification favors direct tool use';
+                }
+                // Otherwise fall through to legacy classifier (DIRECT or ambiguous)
+            }
+        } catch (e) {
+            console.warn('[ChatService] classifyMulti failed, falling back to single intent:', e);
+        }
+
         return await IntentClassifier.classify({
             llmFacade: facade,
             userPrompt,
