@@ -44,7 +44,9 @@ export class GeminiService extends BaseLLMService {
         });
 
         const preparedHistory = this._prepareMessages(history);
-        console.log('Gemini prepared history:', JSON.stringify(preparedHistory, null, 2));
+        if (this.options?.debugLLM) {
+            console.log('Gemini prepared history:', JSON.stringify(preparedHistory, null, 2));
+        }
 
         const chat = model.startChat({
             history: preparedHistory,
@@ -57,7 +59,9 @@ export class GeminiService extends BaseLLMService {
         });
 
         const lastUserMessage = history[history.length - 1].parts;
-        console.log('Gemini last user message:', JSON.stringify(lastUserMessage, null, 2));
+        if (this.options?.debugLLM) {
+            console.log('Gemini last user message:', JSON.stringify(lastUserMessage, null, 2));
+        }
 
         const timeoutMs = this.options?.timeout ?? 300000;
         const timeoutPromise = new Promise((_, reject) =>

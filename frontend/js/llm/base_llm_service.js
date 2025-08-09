@@ -82,7 +82,9 @@ export class BaseLLMService {
      */
     updateConfig(config) {
         this.providerConfig = { ...this.providerConfig, ...config };
-        console.log(`[${this.constructor.name}] Configuration updated:`, config);
+        if (this.options?.debugLLM) {
+            console.log(`[${this.constructor.name}] Configuration updated:`, config);
+        }
     }
 
     /**
@@ -195,7 +197,9 @@ export class BaseLLMService {
                     // Rotate key before attempts after the first one
                     rotationSession.onBeforeAttempt(attempt);
 
-                    console.log(`[${this.constructor.name}] Starting request ${requestId} (attempt ${attempt}/${retryOptions.maxAttempts})`);
+                    if (debug) {
+                        console.log(`[${this.constructor.name}] Starting request ${requestId} (attempt ${attempt}/${retryOptions.maxAttempts})`);
+                    }
                     if (debug) {
                         console.info(`[${this.constructor.name}] keyIndex=${this.apiKeyManager?.currentIndex ?? 'n/a'} attempt=${attempt}`);
                     }
@@ -318,10 +322,12 @@ export class BaseLLMService {
                 }
             } catch (_) {}
 
-            console.log(
-                `[${this.constructor.name}] Request ${requestId} ` +
-                `${hasYieldedAnything ? 'completed' : 'finished without output'} in ${responseTime.toFixed(2)}ms`
-            );
+            if (this.options?.debugLLM) {
+                console.log(
+                    `[${this.constructor.name}] Request ${requestId} ` +
+                    `${hasYieldedAnything ? 'completed' : 'finished without output'} in ${responseTime.toFixed(2)}ms`
+                );
+            }
         }
     }
 
@@ -724,12 +730,4 @@ export class BaseLLMService {
         console.warn(`[${this.constructor.name}] [DEBUG] Will fail next ${this._debugFailuresRemaining} attempt(s) with '${this._debugFailureType}'`);
     }
 
-    /**
-     * DEBUG: Schedule a retryable error to be thrown on the next attempt before contacting provider.
-     * @param {'rate_limit'|'server'|'network'|'timeout'|string} type
-     */
-    debugFailNextAttempt(type = 'rate_limit') {
-        this._debugNextAttemptErrorType = type;
-        console.warn(`[${this.constructor.name}] [DEBUG] Will fail next attempt with synthetic '${type}' error`);
-    }
 }

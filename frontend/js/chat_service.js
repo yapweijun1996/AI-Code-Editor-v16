@@ -344,6 +344,24 @@ export const ChatService = {
                 let modelResponseText = '';
                 let displayText = '';
                 functionCalls = []; // Reset for this iteration
+                // Throttled UI streaming to reduce DOM writes
+                let bufferedDelta = '';
+                let lastFlushTs = 0;
+                const FLUSH_INTERVAL_MS = 50;
+                const flushUI = (force = false) => {
+                    const nowTs = performance.now();
+                    if (!force && (nowTs - lastFlushTs) < FLUSH_INTERVAL_MS) return;
+                    if (bufferedDelta.length === 0) return;
+                    displayText += bufferedDelta;
+                    bufferedDelta = '';
+                    UI.appendMessage(chatMessages, displayText, 'ai', true);
+                    lastFlushTs = nowTs;
+                };
+                // Lightweight perf metrics for verification
+                const reqStartTs = performance.now();
+                let firstTokenTs = null;
+                let chunksCount = 0;
+                let bytesCount = 0;
 
                 for await (const chunk of stream) {
                     if (this.isCancelled) return;
@@ -351,8 +369,11 @@ export const ChatService = {
                     if (chunk.text) {
                         const text = chunk.text;
                         modelResponseText += text;
-                        displayText += text;
-                        UI.appendMessage(chatMessages, displayText, 'ai', true);
+                        bufferedDelta += text;
+                        if (!firstTokenTs) firstTokenTs = performance.now();
+                        chunksCount++;
+                        bytesCount += text.length;
+                        flushUI();
                     }
                     if (chunk.functionCalls) {
                         const providerKey =
@@ -377,6 +398,37 @@ export const ChatService = {
                     }
                 }
 
+                // ensure final UI flush after stream completes
+                flushUI(true);
+                
+                // ensure final UI flush after stream completes
+                flushUI(true);
+
+                // Derive simple perf metrics for this request
+                const totalMs = performance.now() - reqStartTs;
+                const ttfbMs = firstTokenTs ? (firstTokenTs - reqStartTs) : totalMs;
+                const tokensPerSec = totalResponseTokens > 0 ? (totalResponseTokens / (totalMs / 1000)) : 0;
+
+                this.lastRequestMetrics = {
+                    provider: this.currentProvider || (this.llmService?.constructor?.name || '').replace('Service', '').toLowerCase(),
+                    ttfbMs: Math.round(ttfbMs),
+                    totalMs: Math.round(totalMs),
+                    chunks: chunksCount,
+                    bytes: bytesCount,
+                    requestTokens: Number(totalRequestTokens || 0),
+                    responseTokens: Number(totalResponseTokens || 0),
+                    tokensPerSec: Number(tokensPerSec.toFixed(2))
+                };
+
+                if (Settings.get('llm.common.debugLLM')) {
+                    UI.appendMessage(
+                        chatMessages,
+                        `⏱️ TTFB: ${Math.round(ttfbMs)}ms • Total: ${Math.round(totalMs)}ms • Chunks: ${chunksCount} • RespTokens: ${totalResponseTokens} • Thruput: ${this.lastRequestMetrics.tokensPerSec} tok/s`,
+                        'ai-muted'
+                    );
+                    try { console.info('[LLM Perf]', this.lastRequestMetrics); } catch (_) {}
+                }
+                
                 // If no provider usage was reported, estimate tokens as a fallback
                 if (!usageSeen && typeof GPTTokenizer_cl100k_base !== 'undefined') {
                     try {
@@ -1045,6 +1097,7 @@ export const ChatService = {
                 currentKeyMasked,
                 isHealthy: health?.isHealthy ?? null,
                 metrics: health || null,
+                lastRequestMetrics: this.lastRequestMetrics || null
             };
         } catch (e) {
             return { error: e?.message || String(e) };

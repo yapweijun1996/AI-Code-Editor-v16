@@ -473,7 +473,22 @@ Analyze the code and provide the necessary changes to resolve these issues.
         const path = node.id;
         try {
             await FileSystem.deleteEntry(appState.rootDirectoryHandle, path);
+
+            // Close any open editor tab and dispose model immediately
+            try {
+                if (Editor.getOpenFiles().has(path)) {
+                    Editor.closeTab(path, tabBarContainer);
+                }
+            } catch (e) {
+                console.warn('[Main] Failed to close tab for deleted file:', path, e);
+            }
+
             await UI.refreshFileTree(appState.rootDirectoryHandle, appState.onFileSelect, appState);
+
+            // Notify the user
+            try {
+                UI.showToast(`File deleted: ${path}`, 'info', 3000);
+            } catch (_) {}
         } catch (error) {
             console.error('Error deleting entry:', error);
             UI.showError(`Failed to delete: ${error.message}`);
