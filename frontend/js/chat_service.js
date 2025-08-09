@@ -279,7 +279,7 @@ export const ChatService = {
     },
 
     async _performApiCall(history, chatMessages, options = {}) {
-        const { singleTurn = false, useTools = true, directAnalysis = false, overrideMode = null } = options;
+        const { singleTurn = false, useTools = true, directAnalysis = false, overrideMode = null, promptContext = null } = options;
         const controller = new AbortController();
         this.currentAbortController = controller;
 
@@ -333,9 +333,9 @@ export const ChatService = {
                 
                 let stream;
                 if (this.llmFacade) {
-                    stream = this.llmFacade.sendMessageStream(history, tools, mode, customRules, controller.signal);
+                    stream = this.llmFacade.sendMessageStream(history, tools, mode, customRules, controller.signal, promptContext);
                 } else {
-                    const promptPack = PromptBuilder.build(mode, customRules);
+                    const promptPack = PromptBuilder.build(mode, customRules, promptContext || {});
                     const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
                     const effectiveHistory = [systemTurn, ...history];
                     stream = this.llmService.sendMessageStream(effectiveHistory, tools, customRules, controller.signal);
@@ -535,9 +535,9 @@ export const ChatService = {
 
             let fullResponse = '';
             const streamGenerator = this.llmFacade
-                ? this.llmFacade.sendMessageStream(messageHistory, tools, mode, customRules, abortSignal)
+                ? this.llmFacade.sendMessageStream(messageHistory, tools, mode, customRules, abortSignal, options.promptContext || null)
                 : this.llmService.sendMessageStream(
-                    [{ role: 'system', parts: [{ text: PromptBuilder.build(mode, customRules).systemPrompt }] }, ...messageHistory],
+                    [{ role: 'system', parts: [{ text: PromptBuilder.build(mode, customRules, options.promptContext || {}).systemPrompt }] }, ...messageHistory],
                     tools,
                     customRules,
                     abortSignal

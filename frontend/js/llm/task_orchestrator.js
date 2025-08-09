@@ -57,11 +57,24 @@ export const TaskOrchestrator = {
       const contextInfo = chatService._buildTaskContext(nextTask);
       const rawHints = TaskOrchestrator._buildToolHints(nextTask);
       const limitedHints = TaskOrchestrator._limitHints(rawHints);
-      const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
-Context: ${contextInfo}${limitedHints ? `
 
-Helpful tool hints:
-${limitedHints}` : ''}
+      // Build compact system prompt context using slots to reduce token usage
+      const planOutlineHash =
+        (taskManager.tasks.get(mainTask.id)?.context?.planOutlineHash) ||
+        (mainTask.context?.planOutlineHash) ||
+        '';
+      const promptContext = {
+        compact: true,
+        slots: {
+          task_summary: `Main Task: ${mainTask.title}`,
+          plan_outline_hash: planOutlineHash,
+          current_focus: `Subtask: ${nextTask.title}${nextTask.description ? ' - ' + nextTask.description : ''}`,
+          tools_context: limitedHints
+        }
+      };
+
+      const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
+Context: ${contextInfo}
 Execute this task using available tools if needed. Provide only the necessary steps.
 Stop when the work is finished.`;
       
@@ -70,7 +83,7 @@ Stop when the work is finished.`;
       let executionResult = null;
       try {
         const startTime = Date.now();
-        await chatService._performApiCall(ephemeralHistory, chatMessages, { singleTurn: false });
+        await chatService._performApiCall(ephemeralHistory, chatMessages, { singleTurn: false, promptContext });
         const endTime = Date.now();
         const updatedTask = taskManager.tasks.get(nextTask.id);
         if (updatedTask && updatedTask.status === 'in_progress') {

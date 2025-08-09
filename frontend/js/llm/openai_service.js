@@ -27,8 +27,9 @@ export class OpenAIService extends BaseLLMService {
         const messages = this._prepareMessages(history, customRules);
         const toolDecl = ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition);
         const enableTools = this.providerConfig?.enableTools !== false;
-        const tools = (enableTools && toolDecl) ? toolDecl : undefined;
-        const tool_choice = enableTools ? (this.providerConfig?.toolCallMode || 'auto') : 'none';
+        const hasTools = enableTools && (Array.isArray(toolDecl) ? toolDecl.length > 0 : !!toolDecl);
+        const tools = hasTools ? toolDecl : undefined;
+        const tool_choice = hasTools ? (this.providerConfig?.toolCallMode || 'auto') : undefined;
 
         const controller = new AbortController();
         const abortHandler = () => controller.abort();
@@ -54,13 +55,26 @@ export class OpenAIService extends BaseLLMService {
                     const payload = {
                         model: this.model,
                         messages,
-                        stream: true,
-                        temperature: this.providerConfig?.temperature,
-                        top_p: this.providerConfig?.topP,
-                        max_tokens: this.providerConfig?.maxTokens
+                        stream: true
                     };
-                    if (tools) payload.tools = tools;
-                    payload.tool_choice = tool_choice;
+                    // Optional generation params only when explicitly set
+                    if (typeof this.providerConfig?.temperature === 'number') payload.temperature = this.providerConfig.temperature;
+                    if (typeof this.providerConfig?.topP === 'number') payload.top_p = this.providerConfig.topP;
+                    if (typeof this.providerConfig?.maxTokens === 'number') {
+                        const modelName = String(this.model || '');
+                        // Newer OpenAI Chat Completions models (gpt-4o*, gpt-4.1*, o*) require max_completion_tokens
+                        const useMaxCompletion = /^(gpt-4o|gpt-4\.1|o\d)/i.test(modelName);
+                        if (useMaxCompletion) {
+                            payload.max_completion_tokens = this.providerConfig.maxTokens;
+                        } else {
+                            payload.max_tokens = this.providerConfig.maxTokens;
+                        }
+                    }
+                    // Only include tool_choice if tools are present to avoid OpenAI 400 errors
+                    if (tools) {
+                        payload.tools = tools;
+                        payload.tool_choice = tool_choice;
+                    }
                     return payload;
                 })()),
                 signal: controller.signal,
