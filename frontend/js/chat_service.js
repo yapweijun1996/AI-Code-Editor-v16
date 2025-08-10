@@ -24,6 +24,13 @@ export const ChatService = {
         count: 0,
     },
     currentHistory: null,
+    // Anti-loop payload tracking (for dedupe and loop suppression)
+    lastPayloadHash: null,
+    duplicatePayloadCount: 0,
+
+    // Per-execution tool ledger and current task binding
+    lastExecutedTools: [],
+    currentExecutingTaskId: null,
 
     async initialize(rootDirectoryHandle) {
         this.rootDirectoryHandle = rootDirectoryHandle;
@@ -244,10 +251,47 @@ export const ChatService = {
         };
     },
 
+    // Build a concise status digest message about current main task and subtasks
+    _buildStatusDigest(mainTask) {
+        if (!mainTask) return 'Status: No active main task.';
+        const subtasks = (mainTask.subtasks || []).map(id => taskManager.tasks.get(id)).filter(Boolean);
+        const total = subtasks.length;
+        const completed = subtasks.filter(t => t.status === 'completed').length;
+        const failed = subtasks.filter(t => t.status === 'failed').length;
+        const pending = subtasks.filter(t => t.status === 'pending').length;
+        const inProgress = subtasks.filter(t => t.status === 'in_progress').length;
+        return `Status Digest — Parent "${mainTask.title}" [${mainTask.status}] • Subtasks: total=${total}, completed=${completed}, failed=${failed}, pending=${pending}, in_progress=${inProgress}`;
+    },
+
+    // Compute a simple payload hash based on provider, directAnalysis flag, tools names, and history roles/parts
+    _computePayloadHash(provider, tools, directAnalysis, history) {
+        try {
+            const toolNames = (tools?.functionDeclarations || []).map(t => t.name).sort();
+            const historySig = (history || []).map(msg => {
+                // Only include role and lightweight part kinds to avoid huge strings
+                const kinds = (msg.parts || []).map(p => (p.functionCall ? 'fc' : (p.functionResponse ? 'fr' : (p.text ? 't' : 'x'))));
+                return `${msg.role}:${kinds.join('')}`;
+            });
+            const sig = {
+                provider,
+                directAnalysis: !!directAnalysis,
+                tools: toolNames,
+                historySig
+            };
+            return btoa(unescape(encodeURIComponent(JSON.stringify(sig))));
+        } catch (e) {
+            // Fallback: randomize to avoid false positives
+            return `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        }
+    },
+
     async _performApiCall(history, chatMessages, options = {}) {
         const { singleTurn = false, useTools = true, directAnalysis = false } = options;
         // Track whether tools are allowed this turn. Empty-turn retry will disable tools for the next iteration.
         let currentUseTools = useTools;
+
+        // Reset per-call tool ledger to ensure evidence is scoped to this API turn
+        this.lastExecutedTools = [];
 
         if (!this.llmService) {
             UI.showError("LLM Service is not initialized. Please check your settings.");
@@ -275,6 +319,20 @@ export const ChatService = {
                 
                 // Enhanced tool definitions with smart recommendations
                 let tools = currentUseTools ? ToolExecutor.getToolDefinitions() : [];
+                // Pre-flight: duplicate payload suppression (hash based on provider/tools/directAnalysis/history signature)
+                const providerName = this.llmService?.constructor?.name || 'UnknownProvider';
+                const payloadHash = this._computePayloadHash(providerName, tools, directAnalysis, history);
+                if (payloadHash && payloadHash === this.lastPayloadHash) {
+                    this.duplicatePayloadCount = (this.duplicatePayloadCount || 0) + 1;
+                    if (this.duplicatePayloadCount >= 1) {
+                        console.warn('[ChatService] Suppressing duplicate payload to prevent loop/token waste.');
+                        UI.appendMessage(chatMessages, 'Duplicate request detected — skipping to prevent loop.', 'ai-muted');
+                        break; // Exit the outer loop early
+                    }
+                } else {
+                    this.lastPayloadHash = payloadHash;
+                    this.duplicatePayloadCount = 0;
+                }
                 
                 if (useTools) {
                     // Optimize tool selection for amend mode
@@ -371,9 +429,19 @@ export const ChatService = {
                                 console.warn('[ChatService] Redirecting get_file_info(".git") to get_project_structure for repo detection.');
                                 return { ...call, name: 'get_project_structure', args: {} };
                             }
+                            // Heuristic: if get_file_info targets a directory-like path (ends with '/' or lacks extension), route to project structure
+                            if (name === 'get_file_info' && args.filename && (args.filename.endsWith('/') || !args.filename.includes('.'))) {
+                                console.warn(`[ChatService] Redirecting get_file_info("${args.filename}") to get_project_structure (directory heuristic).`);
+                                return { ...call, name: 'get_project_structure', args: {} };
+                            }
 
                             // Single-use guard: ignore task_breakdown if the task already broke down once
                             if (name === 'task_breakdown') {
+                                // Minimal param sanity: skip if taskId missing to avoid "No parameters" noise
+                                if (!args.taskId && !args.task_id) {
+                                    console.warn('[ChatService] Skipped task_breakdown: missing taskId');
+                                    return null;
+                                }
                                 const tId = args.taskId || args.task_id;
                                 if (typeof tId === 'string') {
                                     const t = taskManager.tasks.get(tId);
@@ -403,6 +471,20 @@ export const ChatService = {
                                     console.warn('[ChatService] Skipping task_update with empty updates object.');
                                     return null;
                                 }
+
+                                // CompletionGuard: reject destructive subtask completion without destructive evidence this turn
+                                if (args.updates && args.updates.status === 'completed') {
+                                    const sid = this.currentExecutingTaskId;
+                                    const st = sid ? taskManager.tasks.get(sid) : null;
+                                    const isDestructive = st && /(delete|remove|drop|destroy|wipe|erase|cleanup|rm\s+-rf|format)/i.test(`${st.title} ${st.description || ''}`);
+                                    const destructiveTools = ['delete_file','delete_folder'];
+                                    const hasEvidence = Array.isArray(this.lastExecutedTools) && this.lastExecutedTools.some(t => destructiveTools.includes(t));
+                                    if (isDestructive && !hasEvidence) {
+                                        console.warn('Completion rejected: missing destructive evidence for subtask', st?.title);
+                                        UI.appendMessage(chatMessages, `Completion rejected: missing destructive evidence for subtask "${st?.title}"`, 'ai-muted');
+                                        return null;
+                                    }
+                                }
                             }
 
                             return { ...call, args };
@@ -424,6 +506,8 @@ export const ChatService = {
                         console.log(`Executing tool: ${call.name} sequentially...`);
                         UI.showThinkingIndicator(chatMessages, `Executing tool: ${call.name}...`);
                         const result = await ToolExecutor.execute(call, this.rootDirectoryHandle);
+                        // Record executed tool name for evidence tracking
+                        try { this.lastExecutedTools.push(call.name); } catch (e) {}
                         toolResults.push({
                             id: call.id,
                             name: result.toolResponse.name,
@@ -783,6 +867,11 @@ Reason: [brief explanation]`;
             UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
             await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
 
+            // Append a status digest so the model can see current progress in-history (prevents stateless loops)
+            const parentTask = taskManager.tasks.get(mainTask.id);
+            const digest = this._buildStatusDigest(parentTask);
+            this.currentHistory.push({ role: 'user', parts: [{ text: digest }] });
+
             const contextInfo = this._buildTaskContext(nextTask);
             const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
 Context: ${contextInfo}
@@ -790,12 +879,26 @@ Execute this task step by step. When completed, call the task_update tool to mar
             
             this.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
 
+            // Bind current subtask and reset ledger before the model turn for accurate evidence tracking
+            this.currentExecutingTaskId = nextTask.id;
+            this.lastExecutedTools = [];
+
             let executionResult = null;
             try {
                 const startTime = Date.now();
                 await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: false });
                 const endTime = Date.now();
                 const updatedTask = taskManager.tasks.get(nextTask.id);
+
+                // Tag destructive evidence on successful destructive subtasks
+                try {
+                    const destructive = /(delete|remove|drop|destroy|wipe|erase|cleanup|rm\s+-rf|format)/i.test(`${nextTask.title} ${nextTask.description||''}`);
+                    const hasDestructiveTool = Array.isArray(this.lastExecutedTools) && this.lastExecutedTools.some(t => ['delete_file','delete_folder'].includes(t));
+                    if (updatedTask && updatedTask.status === 'completed' && destructive && hasDestructiveTool) {
+                        updatedTask.results = { ...(updatedTask.results || {}), destructiveEvidence: true, timestamp: Date.now() };
+                        await taskManager.updateTask(updatedTask.id, { results: updatedTask.results });
+                    }
+                } catch(e) { console.warn('[ChatService] Failed to tag destructive evidence:', e?.message); }
 
                 if (updatedTask && updatedTask.status === 'in_progress') {
                     const tags = updatedTask.tags || [];
@@ -861,10 +964,18 @@ Execute this task step by step. When completed, call the task_update tool to mar
             const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
             const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
 
-            // Completion without explicit confirmation (no destructive gating)
-            if (allSubtasks.length === 0 || completedSubtasks.length === 0) {
+            // Require at least one completed destructive subtask with evidence before completing the parent
+            const hasDestructiveEvidence = completedSubtasks.some(t => {
+                const isDestructive = /(delete|remove|drop|destroy|wipe|erase|cleanup|rm\s+-rf|format)/i.test(`${t.title} ${t.description||''}`);
+                return isDestructive && t.results && t.results.destructiveEvidence === true;
+            });
+
+            if ((allSubtasks.length === 0 || completedSubtasks.length === 0)) {
                 await taskManager.updateTask(mainTask.id, { status: 'failed', results: { reason: 'No substasks executed or completed', completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
                 UI.appendMessage(chatMessages, `Main task "${mainTask.title}" did not complete: ${completedSubtasks.length}/${allSubtasks.length} subtasks completed.`, 'ai');
+            } else if (!hasDestructiveEvidence) {
+                await taskManager.updateTask(mainTask.id, { status: 'in_progress', results: { warning: 'no_destructive_evidence', timestamp: Date.now() } });
+                UI.appendMessage(chatMessages, 'Cannot complete: no destructive evidence found.', 'ai-muted');
             } else if (failedSubtasks.length > 0) {
                 await taskManager.updateTask(mainTask.id, { status: 'failed', results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
                 UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');

@@ -619,13 +619,23 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                 const descLC = String(aiSubtask.description || aiSubtask.details || aiSubtask.explanation || aiSubtask.reason || '').toLowerCase();
 
                 const advisoryKeywords = [
-                    'plan', 'guide', 'proposal', 'explain', 'review', 'confirm scope', 'checklist',
-                    'safety', 'backup', 'confirmation', '说明', '方案', '计划', '建议', '确认'
+                    // generic advisory
+                    'plan', 'guide', 'proposal', 'explain', 'review', 'checklist',
+                    // confirmation/approval phrasing in EN/ZH
+                    'confirm scope', 'confirmation', 'confirm', 'approve', 'approval', 'consent', 'are you sure',
+                    '说明', '方案', '计划', '建议', '确认', '批准', '同意',
+                    // backup/dry-run/preview/options phrasing
+                    'backup', 'dry-run', 'dry run', 'preview', 'options', 'option menu',
+                    '备份', '预览', '选项', '确认删除'
                 ];
                 const metaKeywords = [
+                    // tool/state/meta
                     'tool unavailable', 'tool disabled', 'cannot call tool', 'task_breakdown',
-                    'call_task_breakdown', 'destructive_action_requires_confirmation',
-                    'policy', 'rate limit', 'tools are unavailable', '工具不可用', '工具被禁用'
+                    'call_task_breakdown', 'policy', 'rate limit', 'tools are unavailable',
+                    '工具不可用', '工具被禁用',
+                    // explicit confirmation gating phrases to classify as meta (non-actionable)
+                    'destructive_action_requires_confirmation', 'need confirmation', 'requires confirmation',
+                    'requires approval', 'request approval', '等待确认', '需要确认', '需要批准', 'dry-run required'
                 ];
 
                 const contains = (arr) => arr.some(k => titleLC.includes(k) || descLC.includes(k));

@@ -310,6 +310,20 @@ Current context:
 - Time: ${timeString}
 - Timezone: ${timeZone}
 `;
+// Policy: Destructive operations must execute without asking for confirmation
+        const destructivePolicy = `
+# DESTRUCTIVE OPERATIONS POLICY — NO CONFIRMATION
+- When the user's intent is destructive (e.g., "delete", "remove", "wipe", "empty trash", "delete all files and folders"), do not ask for confirmation.
+- Immediately call the appropriate tools (delete_file and/or delete_folder) to perform the requested action.
+- Do not output option menus like "CONFIRM DELETE", "BACKUP THEN DELETE", "MOVE TO BACKUP_FOLDER", "RUN delete_all.sh", or any approval/consent prompts.
+- Avoid phrases: "confirm", "confirmation", "approval", "consent", "are you sure", "dry-run", "preview".
+- If a destructive tool call fails, report the error and directly attempt the next best tool action without blocking on approval.
+- If discovery is needed (e.g., you need to know what to delete), briefly use get_project_structure or get_file_info to identify targets, then proceed to deletion tools in the same turn.
+`;
+        // Attach to base code prompt
+        systemInstructionText = (mode === 'plan' || mode === 'search')
+            ? systemInstructionText
+            : systemInstructionText + '\\n' + destructivePolicy;
         
         const newPlanPrompt = `You are Gemini Strategic Planning Agent, an elite AI research analyst with advanced reasoning capabilities. Your purpose is to provide comprehensive, data-driven strategic insights through systematic research and analysis.
 
