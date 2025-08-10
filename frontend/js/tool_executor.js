@@ -1639,20 +1639,50 @@ async function _taskGetStatus({ taskId }) {
         throw new Error(`Failed to get task status: ${error.message}`);
     }
 }
-async function _startTaskSession({ taskId, description = '', duration = null }) {
-    if (!taskId) throw new Error("The 'taskId' parameter is required.");
-    if (typeof taskId !== 'string') throw new Error("The 'taskId' parameter must be a string.");
-    
+async function _startTaskSession({ taskId, title, description = '', duration = null }) {
+    // Allow either a valid taskId OR a title to auto-create the task and then start the session.
+    if (!taskId && !title) {
+        throw new Error("Either 'taskId' or 'title' is required to start a task session.");
+    }
+
+    let effectiveTaskId = taskId;
+
     try {
-        const task = TaskTools.getById(taskId);
-        if (!task) {
-            throw new Error(`Task with ID ${taskId} not found.`);
+        // Path A: taskId provided
+        if (effectiveTaskId) {
+            if (typeof effectiveTaskId !== 'string') {
+                throw new Error("The 'taskId' parameter must be a string.");
+            }
+            const existing = TaskTools.getById(effectiveTaskId);
+            if (!existing) {
+                // Keep strict behavior when an invalid id is supplied to avoid masking genuine errors
+                throw new Error(`Task with ID ${effectiveTaskId} not found. Create the task first via task_create, or call start_task_session with a 'title' to auto-create.`);
+            }
+
+            const session = await TaskTools.startSession(effectiveTaskId, { description, duration });
+            return {
+                message: `Task session started for "${existing.title}" (ID: ${effectiveTaskId})`,
+                details: session
+            };
         }
-        
-        const session = await TaskTools.startSession(taskId, { description, duration });
+
+        // Path B: No taskId but a title is provided -> auto-create then start
+        const created = await TaskTools.create({
+            title: String(title).trim(),
+            description: (description || '').trim(),
+            priority: 'medium',
+            tags: ['auto-created', 'session-start']
+        });
+
+        effectiveTaskId = created.id;
+
+        const session = await TaskTools.startSession(effectiveTaskId, { description, duration });
         return {
-            message: `Task session started for "${task.title}" (ID: ${taskId})`,
-            details: session
+            message: `Task auto-created and session started for "${created.title}" (ID: ${effectiveTaskId})`,
+            details: {
+                task: created,
+                session
+            }
         };
     } catch (error) {
         throw new Error(`Failed to start task session: ${error.message}`);
@@ -3940,7 +3970,7 @@ export function getToolDefinitions() {
             { name: 'task_breakdown', description: "🎯 CRITICAL: Analyzes a high-level task and breaks it down into SPECIFIC, ACTIONABLE subtasks. DO NOT create generic tasks like 'Analyze requirements' or 'Plan approach'. Instead, create concrete tasks like 'Locate CSS files containing dashboard styles', 'Identify color variables in style.css', 'Update background-color properties to blue theme'. Each subtask should be a specific action that can be executed immediately.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING' } }, required: ['taskId'] } },
             { name: 'task_get_next', description: "Fetches the next logical task for the AI to work on, based on priority and dependencies." },
             { name: 'task_get_status', description: "Gets status information about tasks. Can check a specific task by ID or get overall task statistics.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING', description: 'Optional specific task ID to check. If omitted, returns overview of all tasks.' } } } },
-            { name: 'start_task_session', description: "Starts a new work session for a specific task, tracking time spent and progress. Useful for focused work periods on complex tasks.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING', description: 'The ID of the task to start a session for' }, description: { type: 'STRING', description: 'Optional description of this work session' }, duration: { type: 'NUMBER', description: 'Optional planned duration in minutes' } }, required: ['taskId'] } },
+            { name: 'start_task_session', description: "Starts a new work session for a task. Provide either an existing 'taskId' OR a 'title' to auto-create the task and then start the session. Tracks time spent and progress.", parameters: { type: 'OBJECT', properties: { taskId: { type: 'STRING', description: 'Existing task ID to start a session for' }, title: { type: 'STRING', description: 'If provided without taskId, a new task will be created with this title before starting the session' }, description: { type: 'STRING', description: 'Optional description of this work session' }, duration: { type: 'NUMBER', description: 'Optional planned duration in minutes' } }, required: [] } },
             
             // Enhanced code comprehension tools
             { name: 'analyze_symbol', description: 'Analyzes a symbol (variable, function, class) across the entire codebase to understand its usage, definition, and relationships.', parameters: { type: 'OBJECT', properties: { symbol_name: { type: 'STRING', description: 'The name of the symbol to analyze' }, file_path: { type: 'STRING', description: 'The file path where the symbol is used or defined' } }, required: ['symbol_name', 'file_path'] } },
