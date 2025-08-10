@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Test Listing</title>
+  <style>
+    :root{
+      --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--border:#232838;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;background:var(--bg);color:var(--text);
+      font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,"Apple Color Emoji","Segoe UI Emoji";
+    }
+    header{
+      padding:20px;border-bottom:1px solid var(--border);
+      background:linear-gradient(180deg,rgba(59,130,246,0.10),transparent 60%);
+    }
+    h1{margin:0 0 6px;font-size:20px}
+    .subtitle{color:var(--muted);font-size:13px}
+    main{max-width:980px;margin:0 auto;padding:20px}
+    .grid{
+      display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+    }
+    .card{
+      background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px;
+    }
+    .title{font-weight:600}
+    .desc{color:var(--muted);font-size:13px;line-height:1.5}
+    .actions{margin-top:auto;display:flex;gap:8px;flex-wrap:wrap}
+    a.btn{
+      display:inline-block;text-decoration:none;border:1px solid rgba(59,130,246,0.35);
+      background:rgba(59,130,246,0.15);color:#dbeafe;padding:8px 12px;border-radius:8px;font-size:14px;
+    }
+    a.btn:hover{background:rgba(59,130,246,0.25)}
+    .btn-secondary{
+      border-color:rgba(148,163,184,0.35);background:rgba(148,163,184,0.12);color:#e5e7eb;
+    }
+    .badge{
+      display:inline-block;font-size:10px;padding:2px 6px;border-radius:999px;
+      border:1px solid var(--border);color:var(--muted);margin-left:6px;
+    }
+    footer{margin-top:24px;color:var(--muted);font-size:12px}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Test Listing</h1>
+  <div class="subtitle">Open each test in a new tab to verify functionality independently.</div>
+</header>
+
+<main>
+  <section class="grid">
+
+    <article class="card">
+      <div class="title">DuckDuckGo Search <span class="badge">HTTP POST /api/duckduckgo-search</span></div>
+      <div class="desc">Checks backend connectivity and parsing of DuckDuckGo HTML results. Includes quick health-check query.</div>
+      <div class="actions">
+        <a class="btn" href="./duckduckgo.html" target="_blank" rel="noopener noreferrer">Open Test</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="title">Read URL <span class="badge">HTTP POST /api/read-url</span></div>
+      <div class="desc">Fetches a page via backend, strips scripts/styles/nav, and shows extracted text + links.</div>
+      <div class="actions">
+        <a class="btn" href="./read-url.html" target="_blank" rel="noopener noreferrer">Open Test</a>
+        <a class="btn btn-secondary" href="https://github.com" target="_blank" rel="noopener noreferrer">Try with github.com</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="title">Perform Research <span class="badge">Frontend Tool</span></div>
+      <div class="desc">
+        Multi-stage research workflow. This runs inside the main editor app (uses in-app UI/tooling). Open the guide page for instructions and shortcut to launch the app.
+      </div>
+      <div class="actions">
+        <a class="btn" href="./research.html" target="_blank" rel="noopener noreferrer">Open Guide</a>
+        <a class="btn btn-secondary" href="../index.html" target="_blank" rel="noopener noreferrer">Open Editor App</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="title">File System Tools <span class="badge">Frontend File System API</span></div>
+      <div class="desc">
+        Manually test list_files, read_file, and write_to_file using the browser File System Access API. Select your project root and run operations.
+      </div>
+      <div class="actions">
+        <a class="btn" href="./files.html" target="_blank" rel="noopener noreferrer">Open Test</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="title">Execute Command <span class="badge">HTTP POST /api/execute-tool</span></div>
+      <div class="desc">
+        Run backend-validated terminal commands and query Git file history (run_terminal_command, get_file_history) in the project root.
+      </div>
+      <div class="actions">
+        <a class="btn" href="./command.html" target="_blank" rel="noopener noreferrer">Open Test</a>
+      </div>
+    </article>
+
+  </section>
+
+  <footer>
+    Tip: Keep tests in separate tabs to isolate logs and avoid cross-test side effects.
+  </footer>
+</main>
+</body>
+</html>

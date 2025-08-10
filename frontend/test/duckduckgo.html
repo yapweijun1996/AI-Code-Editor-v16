@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Test: DuckDuckGo Search</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #151820;
+      --text: #e6e6e6;
+      --muted: #9aa4b2;
+      --accent: #3b82f6;
+      --danger: #ef4444;
+      --ok: #10b981;
+      --border: #232838;
+      --code: #0b0e14;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      line-height: 1.4;
+    }
+    header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(59,130,246,0.10), transparent 60%);
+    }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    .subtitle { color: var(--muted); font-size: 13px; }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .test-card {
+      border: 1px solid var(--border);
+      background: #0f131c;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .test-card h2 {
+      margin: 0 0 4px;
+      font-size: 16px;
+    }
+    .desc {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    input[type="text"] {
+      flex: 1 1 360px;
+      min-width: 220px;
+      border: 1px solid var(--border);
+      background: #0b0f17;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+      outline: none;
+    }
+    button {
+      border: 1px solid rgba(59,130,246,0.35);
+      background: rgba(59,130,246,0.15);
+      color: #dbeafe;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover { background: rgba(59,130,246,0.25); }
+    .btn-secondary {
+      border: 1px solid rgba(148,163,184,0.35);
+      background: rgba(148,163,184,0.12);
+      color: #e5e7eb;
+    }
+    .status {
+      font-size: 12px;
+      margin-left: auto;
+      color: var(--muted);
+    }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--danger); }
+    .results {
+      border-top: 1px dashed var(--border);
+      padding-top: 12px;
+      max-height: 420px;
+      overflow: auto;
+    }
+    .result-item {
+      padding: 10px 0;
+      border-bottom: 1px dashed var(--border);
+    }
+    .result-item:last-child { border-bottom: none; }
+    .result-title {
+      font-size: 14px;
+      margin: 0 0 4px;
+    }
+    .result-title a {
+      color: #93c5fd;
+      text-decoration: none;
+    }
+    .result-title a:hover { text-decoration: underline; }
+    .result-link {
+      word-break: break-all;
+      color: #60a5fa;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .snippet {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .log {
+      margin-top: 12px;
+      background: var(--code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      max-height: 200px;
+      overflow: auto;
+      color: #cbd5e1;
+      font-size: 12px;
+    }
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+    .back {
+      display: inline-block;
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: #93c5fd;
+      text-decoration: none;
+    }
+    .back:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DuckDuckGo Search Test</h1>
+    <div class="subtitle">Verifies /api/duckduckgo-search connectivity and parsing.</div>
+  </header>
+
+  <main>
+    <a class="back" href="./index.html">&#8592; Back to Test Listing</a>
+
+    <section class="panel">
+      <article class="test-card" id="ddg-card">
+        <h2>Run Search</h2>
+        <p class="desc">Execute a search via backend and inspect results/logs.</p>
+        <div class="controls">
+          <input type="text" id="ddg-query" placeholder="Enter query (e.g. ECMAScript modules tutorial)" value="test connectivity duckduckgo" />
+          <button id="ddg-run">Run Search</button>
+          <button id="ddg-quick" class="btn-secondary" title="Runs a tiny health-check query.">Quick Health Check</button>
+          <span id="ddg-status" class="status">Idle</span>
+        </div>
+        <div class="results" id="ddg-results"></div>
+        <div class="log" id="ddg-log" hidden></div>
+        <div class="hint">If this test fails intermittently: rate limiting, HTML layout changes or network timeouts could be the cause. The backend includes retries and randomized User-Agent headers.</div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const els = {
+      run: document.getElementById('ddg-run'),
+      quick: document.getElementById('ddg-quick'),
+      query: document.getElementById('ddg-query'),
+      status: document.getElementById('ddg-status'),
+      results: document.getElementById('ddg-results'),
+      log: document.getElementById('ddg-log'),
+      card: document.getElementById('ddg-card'),
+    };
+
+    function setStatus(text, kind = '') {
+      els.status.className = 'status ' + (kind === 'ok' ? 'ok' : kind === 'err' ? 'err' : '');
+      els.status.textContent = text;
+    }
+
+    function logLine(line) {
+      els.log.hidden = false;
+      els.log.textContent += (els.log.textContent ? '\n' : '') + line;
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+
+    function renderResults(results) {
+      els.results.innerHTML = '';
+      if (!Array.isArray(results) || results.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'result-item';
+        empty.innerHTML = '<div class="snippet">No results returned.</div>';
+        els.results.appendChild(empty);
+        return;
+      }
+
+      results.forEach((r, idx) => {
+        const item = document.createElement('div');
+        item.className = 'result-item';
+
+        const title = document.createElement('h3');
+        title.className = 'result-title';
+        const link = document.createElement('a');
+        link.href = r.link || '#';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = `${r.position || idx + 1}. ${r.title || '(no title)'}`;
+        title.appendChild(link);
+
+        const url = document.createElement('div');
+        url.className = 'result-link';
+        url.textContent = r.link || '';
+
+        const snippet = document.createElement('div');
+        snippet.className = 'snippet';
+        snippet.textContent = r.snippet || '';
+
+        item.appendChild(title);
+        item.appendChild(url);
+        item.appendChild(snippet);
+        els.results.appendChild(item);
+      });
+    }
+
+    async function runSearch(query) {
+      els.results.innerHTML = '';
+      els.log.hidden = true;
+      els.log.textContent = '';
+      setStatus('Running...', '');
+
+      const payload = { query: String(query || '').trim() };
+      if (!payload.query) {
+        setStatus('Enter a query', 'err');
+        return;
+      }
+
+      logLine(`POST /api/duckduckgo-search -> ${JSON.stringify(payload)}`);
+
+      let response, json;
+      const started = performance.now();
+      try {
+        response = await fetch('/api/duckduckgo-search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        setStatus('Network error', 'err');
+        logLine(`Network error: ${e.message}`);
+        return;
+      }
+
+      const elapsed = Math.round(performance.now() - started);
+      logLine(`HTTP ${response.status} in ${elapsed} ms`);
+
+      try {
+        json = await response.json();
+      } catch (e) {
+        setStatus('Invalid JSON', 'err');
+        logLine(`Failed to parse JSON: ${e.message}`);
+        return;
+      }
+
+      if (!response.ok) {
+        setStatus('Backend error', 'err');
+        logLine(`Error message: ${json.message || 'Unknown error'}`);
+        return;
+      }
+
+      const results = json.results || [];
+      renderResults(results);
+
+      if (results.length > 0) {
+        setStatus(`OK (${results.length} results)`, 'ok');
+      } else {
+        setStatus('No results returned', '');
+      }
+    }
+
+    els.run.addEventListener('click', () => runSearch(els.query.value));
+    els.query.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runSearch(els.query.value);
+    });
+    els.quick.addEventListener('click', () => runSearch('site:mozilla.org web api'));
+  </script>
+</body>
+</html>

@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Test: File System Tools (list_files, read_file, write_to_file)</title>
+  <style>
+    :root{
+      --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--ok:#10b981;--warn:#f59e0b;--danger:#ef4444;--border:#232838;--code:#0b0e14;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    header{padding:20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(59,130,246,0.10),transparent 60%)}
+    h1{margin:0 0 6px;font-size:20px}
+    .subtitle{color:var(--muted);font-size:13px}
+    main{max-width:1100px;margin:0 auto;padding:20px}
+    a.back{display:inline-block;margin:8px 0 14px;color:#93c5fd;text-decoration:none;font-size:13px}
+    a.back:hover{text-decoration:underline}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+    .panel h2{font-size:16px;margin:0 0 8px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+    .row input[type="text"], .row textarea{
+      background:#0f131c;border:1px solid var(--border);color:#e5e7eb;border-radius:8px;padding:8px;font-size:13px;width:100%
+    }
+    .row textarea{height:160px;resize:vertical}
+    .row .half{flex:1 1 48%}
+    .btn{
+      display:inline-block;text-decoration:none;border:1px solid rgba(59,130,246,0.35);
+      background:rgba(59,130,246,0.15);color:#dbeafe;padding:8px 12px;border-radius:8px;font-size:14px;cursor:pointer
+    }
+    .btn:hover{background:rgba(59,130,246,0.25)}
+    .btn-secondary{border-color:rgba(148,163,184,0.35);background:rgba(148,163,184,0.12);color:#e5e7eb}
+    .btn-ok{border-color:rgba(16,185,129,0.4);background:rgba(16,185,129,0.15);color:#d1fae5}
+    .btn-warn{border-color:rgba(245,158,11,0.4);background:rgba(245,158,11,0.15);color:#fde68a}
+    .status{font-size:12px;margin-top:8px}
+    .status.ok{color:#86efac}
+    .status.err{color:#fca5a5}
+    .code{
+      background:var(--code);border:1px solid var(--border);border-radius:8px;padding:10px;
+      white-space:pre-wrap;color:#cbd5e1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px
+    }
+    ul.tree{list-style:none;margin:0;padding-left:16px}
+    ul.tree li{margin:2px 0}
+    .file{color:#cbd5e1}
+    .dir{color:#93c5fd}
+    .note{color:var(--muted);font-size:12px;margin-top:8px}
+    @media (max-width: 960px){ .grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+<header>
+  <h1>File System Tools Test</h1>
+  <div class="subtitle">Manual tests for list_files, read_file, and write_to_file using the browser File System Access API.</div>
+</header>
+
+<main>
+  <a class="back" href="./index.html">&#8592; Back to Test Listing</a>
+
+  <section class="panel" id="picker">
+    <h2>Project Root</h2>
+    <div class="row">
+      <button id="btnPickRoot" class="btn">Choose Directory...</button>
+      <button id="btnForgetRoot" class="btn btn-secondary">Forget Permission</button>
+    </div>
+    <div id="rootStatus" class="status">Root: not selected</div>
+    <div class="note">
+      This page uses the browser's File System Access API. Choose your project root directory to enable operations. Your permissions stay in the browser only.
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="panel" id="listPanel">
+      <h2>list_files</h2>
+      <div class="row">
+        <input id="listPath" type="text" placeholder="Relative path (e.g., frontend/js). Leave empty for root."/>
+        <button id="btnList" class="btn">List</button>
+        <label class="note"><input type="checkbox" id="chkRecursive" checked/> Recursive</label>
+      </div>
+      <div id="listStatus" class="status"></div>
+      <div id="listOutput" class="code" style="margin-top:8px;max-height:320px;overflow:auto"></div>
+    </section>
+
+    <section class="panel" id="readPanel">
+      <h2>read_file</h2>
+      <div class="row">
+        <input id="readPath" type="text" placeholder="Relative file path (e.g., README.md)"/>
+        <button id="btnRead" class="btn">Read</button>
+      </div>
+      <div id="readStatus" class="status"></div>
+      <div id="readOutput" class="code" style="margin-top:8px;max-height:360px;overflow:auto"></div>
+    </section>
+  </div>
+
+  <section class="panel" id="writePanel" style="margin-top:16px">
+    <h2>write_to_file</h2>
+    <div class="row">
+      <div class="half">
+        <input id="writePath" type="text" placeholder="Relative file path to write (e.g., tmp/test.txt)"/>
+      </div>
+      <div class="half" style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="btnWrite" class="btn btn-ok">Write (Create/Overwrite)</button>
+        <button id="btnAppend" class="btn btn-warn">Append</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <textarea id="writeContent" placeholder="Content to write or append..."></textarea>
+    </div>
+    <div id="writeStatus" class="status"></div>
+  </section>
+
+  <section class="panel" id="logPanel" style="margin-top:16px">
+    <h2>Log</h2>
+    <div id="log" class="code" style="max-height:220px;overflow:auto"></div>
+  </section>
+</main>
+
+<script>
+(function(){
+  let rootHandle = null;
+
+  const el = id => document.getElementById(id);
+  const log = (...args) => {
+    const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a, null, 2)).join(' ');
+    const logEl = el('log');
+    const at = new Date().toLocaleTimeString();
+    logEl.textContent += '[' + at + '] ' + msg + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  const setStatus = (id, text, type='') => {
+    const s = el(id);
+    s.textContent = text || '';
+    s.className = 'status' + (type ? ' ' + type : '');
+  };
+
+  const showRoot = () => {
+    setStatus('rootStatus', rootHandle ? 'Root: permission granted' : 'Root: not selected');
+  };
+
+  async function verifyPermission(handle, opts = { mode: 'readwrite' }) {
+    if ((await handle.queryPermission(opts)) === 'granted') return true;
+    if ((await handle.requestPermission(opts)) === 'granted') return true;
+    return false;
+  }
+
+  async function getHandleFromPath(pathStr) {
+    if (!rootHandle) throw new Error('Root not selected');
+    const parts = pathStr.split('/').filter(Boolean);
+    if (parts.length === 0) return rootHandle;
+
+    let current = rootHandle;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const isLast = i === parts.length - 1;
+
+      // Try as directory first
+      try {
+        current = await current.getDirectoryHandle(part);
+        continue;
+      } catch (_) {
+        // Not a directory; try file if last
+        if (isLast) {
+          try {
+            current = await current.getFileHandle(part);
+            return current;
+          } catch (e) {
+            throw new Error('Path not found: ' + pathStr);
+          }
+        } else {
+          throw new Error('Directory not found: ' + parts.slice(0, i+1).join('/'));
+        }
+      }
+    }
+    return current;
+  }
+
+  async function ensureParentDirs(dirHandle, parts) {
+    let current = dirHandle;
+    for (const p of parts) {
+      current = await current.getDirectoryHandle(p, { create: true });
+    }
+    return current;
+  }
+
+  async function listEntries(startHandle, recursive) {
+    const results = [];
+    async function walkDirectory(dirHandle, prefix) {
+      for await (const entry of dirHandle.values()) {
+        const fullPath = prefix ? prefix + '/' + entry.name : entry.name;
+        if (entry.kind === 'file') {
+          results.push({ type: 'file', path: fullPath });
+        } else if (entry.kind === 'directory') {
+          results.push({ type: 'dir', path: fullPath });
+          if (recursive) {
+            await walkDirectory(entry, fullPath);
+          }
+        }
+      }
+    }
+    if (startHandle.kind === 'file') {
+      results.push({ type: 'file', path: '' });
+    } else {
+      await walkDirectory(startHandle, '');
+    }
+    return results;
+  }
+
+  function renderTree(entries) {
+    const sort = (a, b) => {
+      if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+      return a.path.localeCompare(b.path);
+    };
+    entries.sort(sort);
+    const lines = entries.map(e => (e.type === 'dir' ? '📁 ' : '📄 ') + e.path);
+    return lines.join('\n');
+  }
+
+  // UI bindings
+  el('btnPickRoot').addEventListener('click', async () => {
+    try {
+      rootHandle = await window.showDirectoryPicker({ id: 'ai-ide-root' });
+      const ok = await verifyPermission(rootHandle, { mode: 'readwrite' });
+      if (!ok) throw new Error('Permission not granted');
+      showRoot();
+      log('Selected root directory.');
+    } catch (e) {
+      log('Failed to select root:', e.message || e);
+      setStatus('rootStatus', 'Root selection failed: ' + (e.message || e), 'err');
+    }
+  });
+
+  el('btnForgetRoot').addEventListener('click', async () => {
+    // Note: There is no standard way to revoke permissions programmatically.
+    // This button just clears our references and informs the user to reload/clear site data for full revocation.
+    rootHandle = null;
+    showRoot();
+    log('Cleared root handle reference. To fully revoke, clear site data in your browser.');
+  });
+
+  el('btnList').addEventListener('click', async () => {
+    setStatus('listStatus', '');
+    el('listOutput').textContent = '';
+    try {
+      if (!rootHandle) throw new Error('Select a root directory first.');
+      const rel = (el('listPath').value || '').trim();
+      const recursive = el('chkRecursive').checked;
+      log('list_files:', JSON.stringify({ path: rel || '.', recursive }));
+
+      let startHandle = rootHandle;
+      if (rel) {
+        // Try get directory handle for the path
+        const parts = rel.split('/').filter(Boolean);
+        let current = rootHandle;
+        for (const p of parts) {
+          current = await current.getDirectoryHandle(p);
+        }
+        startHandle = current;
+      }
+
+      const entries = await listEntries(startHandle, recursive);
+      el('listOutput').textContent = renderTree(entries);
+      setStatus('listStatus', `Listed ${entries.length} entries`, 'ok');
+    } catch (e) {
+      setStatus('listStatus', e.message || String(e), 'err');
+      log('list_files error:', e.message || e);
+    }
+  });
+
+  el('btnRead').addEventListener('click', async () => {
+    setStatus('readStatus', '');
+    el('readOutput').textContent = '';
+    try {
+      if (!rootHandle) throw new Error('Select a root directory first.');
+      const filePath = (el('readPath').value || '').trim();
+      if (!filePath) throw new Error('Please enter a relative file path to read.');
+      log('read_file:', JSON.stringify({ filename: filePath }));
+
+      const parts = filePath.split('/').filter(Boolean);
+      let current = rootHandle;
+      for (let i = 0; i < parts.length - 1; i++) {
+        current = await current.getDirectoryHandle(parts[i]);
+      }
+      const fh = await current.getFileHandle(parts[parts.length - 1]);
+      const file = await fh.getFile();
+      const text = await file.text();
+
+      el('readOutput').textContent = text;
+      setStatus('readStatus', `Read ${file.size} bytes`, 'ok');
+    } catch (e) {
+      setStatus('readStatus', e.message || String(e), 'err');
+      log('read_file error:', e.message || e);
+    }
+  });
+
+  el('btnWrite').addEventListener('click', async () => {
+    await writeInternal(false);
+  });
+
+  el('btnAppend').addEventListener('click', async () => {
+    await writeInternal(true);
+  });
+
+  async function writeInternal(append) {
+    setStatus('writeStatus', '');
+    try {
+      if (!rootHandle) throw new Error('Select a root directory first.');
+      const filePath = (el('writePath').value || '').trim();
+      const content = el('writeContent').value ?? '';
+      if (!filePath) throw new Error('Please enter a relative file path to write.');
+      log(append ? 'append_to_file:' : 'write_to_file:', JSON.stringify({ filename: filePath, contentPreview: content.slice(0, 80) + (content.length > 80 ? '…' : '') }));
+
+      const parts = filePath.split('/').filter(Boolean);
+      const filename = parts.pop();
+      const parent = await ensureParentDirs(rootHandle, parts);
+      const fh = await parent.getFileHandle(filename, { create: true });
+
+      let newContent = content;
+      if (append) {
+        try {
+          const existing = await (await fh.getFile()).text();
+          newContent = existing + content;
+        } catch (_) {
+          // If doesn't exist or unreadable, just write new content
+        }
+      }
+
+      const writable = await fh.createWritable();
+      await writable.write(newContent);
+      await writable.close();
+
+      setStatus('writeStatus', append ? 'Append successful' : 'Write successful', 'ok');
+    } catch (e) {
+      setStatus('writeStatus', e.message || String(e), 'err');
+      log('write_to_file error:', e.message || e);
+    }
+  }
+
+  // Initialize
+  showRoot();
+})();
+</script>
+</body>
+</html>

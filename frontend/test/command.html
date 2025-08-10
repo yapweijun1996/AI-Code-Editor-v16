@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Test: Execute Command (Backend)</title>
+  <style>
+    :root{
+      --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--ok:#10b981;--warn:#f59e0b;--danger:#ef4444;--border:#232838;--code:#0b0e14;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    header{padding:20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(59,130,246,0.10),transparent 60%)}
+    h1{margin:0 0 6px;font-size:20px}
+    .subtitle{color:var(--muted);font-size:13px}
+    main{max-width:980px;margin:0 auto;padding:20px}
+    a.back{display:inline-block;margin:8px 0 14px;color:#93c5fd;text-decoration:none;font-size:13px}
+    a.back:hover{text-decoration:underline}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+    .panel h2{font-size:16px;margin:0 0 8px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+    .row input[type="text"], .row textarea{
+      background:#0f131c;border:1px solid var(--border);color:#e5e7eb;border-radius:8px;padding:8px;font-size:13px;width:100%
+    }
+    .row textarea{height:120px;resize:vertical}
+    .btn{
+      display:inline-block;text-decoration:none;border:1px solid rgba(59,130,246,0.35);
+      background:rgba(59,130,246,0.15);color:#dbeafe;padding:8px 12px;border-radius:8px;font-size:14px;cursor:pointer
+    }
+    .btn:hover{background:rgba(59,130,246,0.25)}
+    .btn-secondary{border-color:rgba(148,163,184,0.35);background:rgba(148,163,184,0.12);color:#e5e7eb}
+    .btn-ok{border-color:rgba(16,185,129,0.4);background:rgba(16,185,129,0.15);color:#d1fae5}
+    .status{font-size:12px;margin-top:8px}
+    .status.ok{color:#86efac}
+    .status.err{color:#fca5a5}
+    .code{
+      background:var(--code);border:1px solid var(--border);border-radius:8px;padding:10px;
+      white-space:pre-wrap;color:#cbd5e1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px
+    }
+    .note{color:var(--muted);font-size:12px;margin-top:8px}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Execute Command Test</h1>
+  <div class="subtitle">Manual tests for backend command execution via HTTP POST /api/execute-tool (run_terminal_command, get_file_history).</div>
+</header>
+
+<main>
+  <a class="back" href="./index.html">&#8592; Back to Test Listing</a>
+
+  <section class="panel">
+    <h2>Run Terminal Command</h2>
+    <div class="row">
+      <input id="cmd" type="text" placeholder="Enter command (e.g., git status OR node -v OR ls -la)"/>
+      <button id="btnRun" class="btn btn-ok">Run</button>
+      <button id="btnSample" class="btn btn-secondary">Sample: git --version</button>
+    </div>
+    <div id="cmdStatus" class="status"></div>
+    <div id="cmdOutput" class="code" style="margin-top:8px;max-height:320px;overflow:auto"></div>
+    <div class="note">
+      Notes:
+      <ul>
+        <li>Commands execute in the project root (server enforces cd to the correct directory).</li>
+        <li>Windows uses PowerShell; macOS/Linux use /bin/bash.</li>
+        <li>Errors (e.g., not a git repo) will be returned with status 'Error' and details.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Get File History (Git)</h2>
+    <div class="row">
+      <input id="histFile" type="text" placeholder="Relative path to file (e.g., README.md)"/>
+      <button id="btnHistory" class="btn">Get History</button>
+      <button id="btnHistorySample" class="btn btn-secondary">Sample: backend/index.js</button>
+    </div>
+    <div id="histStatus" class="status"></div>
+    <div id="histOutput" class="code" style="margin-top:8px;max-height:320px;overflow:auto"></div>
+    <div class="note">
+      Requires a Git repository with commit history. The backend sanitizes the filename and runs:
+      git log --pretty=format:'%H|%an|%ad|%s' -- "filename"
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  const el = id => document.getElementById(id);
+
+  async function postJSON(url, data){
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify(data)
+    });
+    let payload;
+    try{ payload = await res.json(); } catch(e){ payload = { status: 'Error', message: 'Non-JSON response', raw: await res.text() }; }
+    return { ok: res.ok, status: res.status, data: payload };
+  }
+
+  el('btnSample').addEventListener('click', () => {
+    el('cmd').value = 'git --version';
+  });
+
+  el('btnRun').addEventListener('click', async () => {
+    const cmd = (el('cmd').value || '').trim();
+    el('cmdStatus').textContent = '';
+    el('cmdOutput').textContent = '';
+    if(!cmd){
+      el('cmdStatus').textContent = 'Please enter a command to run.';
+      el('cmdStatus').className = 'status err';
+      return;
+    }
+    el('cmdStatus').textContent = 'Running...';
+    el('cmdStatus').className = 'status';
+
+    try{
+      const { ok, data } = await postJSON('/api/execute-tool', {
+        toolName: 'run_terminal_command',
+        parameters: { command: cmd }
+      });
+      if(ok && data.status === 'Success'){
+        el('cmdOutput').textContent = data.output || '(no stdout)';
+        el('cmdStatus').textContent = 'Success';
+        el('cmdStatus').className = 'status ok';
+      }else{
+        el('cmdOutput').textContent = (data && (data.output || data.message)) ? (data.output || data.message) : JSON.stringify(data, null, 2);
+        el('cmdStatus').textContent = 'Error';
+        el('cmdStatus').className = 'status err';
+      }
+    }catch(e){
+      el('cmdOutput').textContent = e.message || String(e);
+      el('cmdStatus').textContent = 'Request failed';
+      el('cmdStatus').className = 'status err';
+    }
+  });
+
+  el('btnHistorySample').addEventListener('click', () => {
+    el('histFile').value = 'backend/index.js';
+  });
+
+  el('btnHistory').addEventListener('click', async () => {
+    const filename = (el('histFile').value || '').trim();
+    el('histStatus').textContent = '';
+    el('histOutput').textContent = '';
+    if(!filename){
+      el('histStatus').textContent = 'Please enter a filename.';
+      el('histStatus').className = 'status err';
+      return;
+    }
+    el('histStatus').textContent = 'Querying...';
+    el('histStatus').className = 'status';
+
+    try{
+      const { ok, data } = await postJSON('/api/execute-tool', {
+        toolName: 'get_file_history',
+        parameters: { filename }
+      });
+      if(ok && data.status === 'Success'){
+        // Each line: %H|%an|%ad|%s
+        const formatted = (data.output || '').trim();
+        el('histOutput').textContent = formatted || '(no history)';
+        el('histStatus').textContent = 'Success';
+        el('histStatus').className = 'status ok';
+      }else{
+        el('histOutput').textContent = (data && (data.output || data.message)) ? (data.output || data.message) : JSON.stringify(data, null, 2);
+        el('histStatus').textContent = 'Error';
+        el('histStatus').className = 'status err';
+      }
+    }catch(e){
+      el('histOutput').textContent = e.message || String(e);
+      el('histStatus').textContent = 'Request failed';
+      el('histStatus').className = 'status err';
+    }
+  });
+})();
+</script>
+</body>
+</html>

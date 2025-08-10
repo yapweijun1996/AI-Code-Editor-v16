@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Test: Read URL</title>
+  <style>
+    :root{
+      --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--ok:#10b981;--danger:#ef4444;--border:#232838;--code:#0b0e14;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    header{padding:20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(59,130,246,0.10),transparent 60%)}
+    h1{margin:0 0 6px;font-size:20px}
+    .subtitle{color:var(--muted);font-size:13px}
+    main{max-width:1100px;margin:0 auto;padding:20px}
+    a.back{display:inline-block;margin:8px 0 14px;color:#93c5fd;text-decoration:none;font-size:13px}
+    a.back:hover{text-decoration:underline}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+    input[type="text"]{
+      flex:1 1 520px;min-width:260px;border:1px solid var(--border);background:#0b0f17;color:var(--text);
+      border-radius:8px;padding:10px 12px;font-size:14px;outline:none
+    }
+    button{border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.15);color:#dbeafe;padding:10px 14px;border-radius:8px;font-size:14px;cursor:pointer}
+    button:hover{background:rgba(59,130,246,0.25)}
+    .btn-secondary{border-color:rgba(148,163,184,0.35);background:rgba(148,163,184,0.12);color:#e5e7eb}
+    .status{font-size:12px;margin-left:auto;color:var(--muted)}
+    .status.ok{color:var(--ok)} .status.err{color:var(--danger)}
+    .split{display:grid;grid-template-columns: 1fr 360px;gap:12px}
+    .content, .links{border:1px solid var(--border);background:#0f131c;border-radius:10px;padding:12px}
+    .content pre{
+      margin:0;background:var(--code);border:1px solid var(--border);border-radius:8px;padding:12px;
+      color:#cbd5e1;max-height:520px;overflow:auto;white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px
+    }
+    .links-list{max-height:520px;overflow:auto}
+    .link-item{padding:8px 0;border-bottom:1px dashed var(--border)}
+    .link-item:last-child{border-bottom:none}
+    .link-item a{color:#93c5fd;text-decoration:none;word-break:break-all;font-size:13px}
+    .link-item a:hover{text-decoration:underline}
+    .log{
+      margin-top:12px;background:var(--code);border:1px solid var(--border);border-radius:8px;padding:10px;
+      white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;max-height:200px;overflow:auto;color:#cbd5e1;font-size:12px
+    }
+    .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Read URL Test</h1>
+    <div class="subtitle">Verifies /api/read-url endpoint by fetching and extracting page content and links.</div>
+  </header>
+
+  <main>
+    <a class="back" href="./index.html">&#8592; Back to Test Listing</a>
+
+    <section class="panel">
+      <div class="controls">
+        <input id="url-input" type="text" placeholder="Enter a URL (e.g. https://developer.mozilla.org/)" value="https://example.com/">
+        <button id="run">Fetch Content</button>
+        <button id="quick" class="btn-secondary" title="Quick check using a stable URL">Quick Check</button>
+        <span id="status" class="status">Idle</span>
+      </div>
+
+      <div class="split">
+        <div class="content">
+          <div style="font-weight:600;margin-bottom:6px;">Extracted Text</div>
+          <pre id="content"></pre>
+        </div>
+        <div class="links">
+          <div style="font-weight:600;margin-bottom:6px;">Links</div>
+          <div id="links" class="links-list"></div>
+        </div>
+      </div>
+
+      <div id="log" class="log" hidden></div>
+      <div class="hint">If the endpoint fails, check server logs. Some sites may block scraping or require additional headers. Backend sets UA and strips scripts/styles/nav for a cleaner body text.</div>
+    </section>
+  </main>
+
+  <script>
+    const els = {
+      url: document.getElementById('url-input'),
+      run: document.getElementById('run'),
+      quick: document.getElementById('quick'),
+      status: document.getElementById('status'),
+      content: document.getElementById('content'),
+      links: document.getElementById('links'),
+      log: document.getElementById('log'),
+    };
+
+    function setStatus(text, kind=''){
+      els.status.className = 'status ' + (kind==='ok'?'ok':kind==='err'?'err':'');
+      els.status.textContent = text;
+    }
+    function logLine(line){
+      els.log.hidden = false;
+      els.log.textContent += (els.log.textContent? '\n':'') + line;
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+    function renderResult(data){
+      const text = (data && data.content) ? String(data.content) : '';
+      els.content.textContent = text || '(No text extracted)';
+      els.links.innerHTML = '';
+      const links = Array.isArray(data && data.links) ? data.links : [];
+      if(links.length===0){
+        const div = document.createElement('div');
+        div.className = 'link-item';
+        div.textContent = '(No links found)';
+        els.links.appendChild(div);
+        return;
+      }
+      links.forEach(u=>{
+        const item = document.createElement('div');
+        item.className = 'link-item';
+        const a = document.createElement('a');
+        a.href = u;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = u;
+        item.appendChild(a);
+        els.links.appendChild(item);
+      });
+    }
+
+    async function run(url){
+      els.content.textContent = '';
+      els.links.innerHTML = '';
+      els.log.hidden = true;
+      els.log.textContent = '';
+      const target = String(url||'').trim();
+      if(!target){
+        setStatus('Enter a URL','err');
+        return;
+      }
+      setStatus('Fetching...');
+      logLine(`POST /api/read-url -> ${JSON.stringify({url: target})}`);
+
+      let res, json;
+      const started = performance.now();
+      try{
+        res = await fetch('/api/read-url', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ url: target })
+        });
+      }catch(e){
+        setStatus('Network error','err');
+        logLine(`Network error: ${e.message}`);
+        return;
+      }
+      const elapsed = Math.round(performance.now() - started);
+      logLine(`HTTP ${res.status} in ${elapsed} ms`);
+
+      try{
+        json = await res.json();
+      }catch(e){
+        setStatus('Invalid JSON','err');
+        logLine(`Failed to parse JSON: ${e.message}`);
+        return;
+      }
+
+      if(!res.ok){
+        setStatus('Backend error','err');
+        logLine(`Error message: ${json.message || 'Unknown error'}`);
+        return;
+      }
+
+      renderResult(json);
+      setStatus('OK','ok');
+    }
+
+    els.run.addEventListener('click', ()=> run(els.url.value));
+    els.url.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ run(els.url.value); }});
+    els.quick.addEventListener('click', ()=> run('https://example.com/'));
+  </script>
+</body>
+</html>
