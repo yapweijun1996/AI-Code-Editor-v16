@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Test: File System Tools (list_files, read_file, write_to_file, search_in_file, read_file_lines, rename_file)</title>
+  <title>Test: Search & File Ops (search_in_file, read_file_lines, rename_file)</title>
   <style>
     :root{
       --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--ok:#10b981;--warn:#f59e0b;--danger:#ef4444;--border:#232838;--code:#0b0e14;
@@ -23,9 +23,9 @@
     .row input[type="text"], .row input[type="number"], .row textarea{
       background:#0f131c;border:1px solid var(--border);color:#e5e7eb;border-radius:8px;padding:8px;font-size:13px;width:100%
     }
-    .row textarea{height:160px;resize:vertical}
     .row .half{flex:1 1 48%}
     .row .third{flex:1 1 30%}
+    .row textarea{height:140px;resize:vertical}
     .btn{
       display:inline-block;text-decoration:none;border:1px solid rgba(59,130,246,0.35);
       background:rgba(59,130,246,0.15);color:#dbeafe;padding:8px 12px;border-radius:8px;font-size:14px;cursor:pointer
@@ -41,18 +41,14 @@
       background:var(--code);border:1px solid var(--border);border-radius:8px;padding:10px;
       white-space:pre-wrap;color:#cbd5e1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px
     }
-    ul.tree{list-style:none;margin:0;padding-left:16px}
-    ul.tree li{margin:2px 0}
-    .file{color:#cbd5e1}
-    .dir{color:#93c5fd}
     .note{color:var(--muted);font-size:12px;margin-top:8px}
-    @media (max-width: 1100px){ .grid{grid-template-columns:1fr} }
+    @media (max-width: 960px){ .grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
 <header>
-  <h1>File System Tools Test</h1>
-  <div class="subtitle">Manual tests using the browser File System Access API: list_files, read_file, write_to_file, search_in_file, read_file_lines, and rename_file.</div>
+  <h1>Search & File Operations Test</h1>
+  <div class="subtitle">Manual tests for search_in_file, read_file_lines, and rename_file using the browser File System Access API.</div>
 </header>
 
 <main>
@@ -66,51 +62,11 @@
     </div>
     <div id="rootStatus" class="status">Root: not selected</div>
     <div class="note">
-      This page uses the browser's File System Access API. Choose your project root directory to enable operations. Your permissions stay in the browser only.
+      Choose your project root directory to enable operations. Permissions are scoped to this browser.
     </div>
   </section>
 
   <div class="grid">
-    <section class="panel" id="listPanel">
-      <h2>list_files</h2>
-      <div class="row">
-        <input id="listPath" type="text" placeholder="Relative path (e.g., frontend/js). Leave empty for root."/>
-        <button id="btnList" class="btn">List</button>
-        <label class="note"><input type="checkbox" id="chkRecursive" checked/> Recursive</label>
-      </div>
-      <div id="listStatus" class="status"></div>
-      <div id="listOutput" class="code" style="margin-top:8px;max-height:320px;overflow:auto"></div>
-    </section>
-
-    <section class="panel" id="readPanel">
-      <h2>read_file</h2>
-      <div class="row">
-        <input id="readPath" type="text" placeholder="Relative file path (e.g., README.md)"/>
-        <button id="btnRead" class="btn">Read</button>
-      </div>
-      <div id="readStatus" class="status"></div>
-      <div id="readOutput" class="code" style="margin-top:8px;max-height:360px;overflow:auto"></div>
-    </section>
-  </div>
-
-  <section class="panel" id="writePanel" style="margin-top:16px">
-    <h2>write_to_file</h2>
-    <div class="row">
-      <div class="half">
-        <input id="writePath" type="text" placeholder="Relative file path to write (e.g., tmp/test.txt)"/>
-      </div>
-      <div class="half" style="display:flex;gap:8px;justify-content:flex-end">
-        <button id="btnWrite" class="btn btn-ok">Write (Create/Overwrite)</button>
-        <button id="btnAppend" class="btn btn-warn">Append</button>
-      </div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <textarea id="writeContent" placeholder="Content to write or append..."></textarea>
-    </div>
-    <div id="writeStatus" class="status"></div>
-  </section>
-
-  <div class="grid" style="margin-top:16px">
     <section class="panel" id="searchPanel">
       <h2>search_in_file</h2>
       <div class="row">
@@ -128,7 +84,7 @@
       </div>
       <div id="searchStatus" class="status"></div>
       <div id="searchOutput" class="code" style="margin-top:8px;max-height:340px;overflow:auto"></div>
-      <div class="note">Displays matching lines with line numbers and a small context window.</div>
+      <div class="note">Displays matching lines with line numbers and small context window.</div>
     </section>
 
     <section class="panel" id="linesPanel">
@@ -157,7 +113,7 @@
       <button id="btnRename" class="btn btn-ok">Rename / Move</button>
     </div>
     <div id="renameStatus" class="status"></div>
-    <div class="note">Implemented via copy+delete using the File System Access API to simulate rename/move.</div>
+    <div class="note">Implemented via copy+delete using the File System Access API to simulate rename.</div>
   </section>
 
   <section class="panel" id="logPanel" style="margin-top:16px">
@@ -173,21 +129,17 @@
   const el = id => document.getElementById(id);
   const log = (...args) => {
     const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a, null, 2)).join(' ');
-    const logEl = el('log');
     const at = new Date().toLocaleTimeString();
+    const logEl = el('log');
     logEl.textContent += '[' + at + '] ' + msg + '\\n';
     logEl.scrollTop = logEl.scrollHeight;
   };
-
   const setStatus = (id, text, type='') => {
     const s = el(id);
     s.textContent = text || '';
     s.className = 'status' + (type ? ' ' + type : '');
   };
-
-  const showRoot = () => {
-    setStatus('rootStatus', rootHandle ? 'Root: permission granted' : 'Root: not selected');
-  };
+  const showRoot = () => setStatus('rootStatus', rootHandle ? 'Root: permission granted' : 'Root: not selected');
 
   async function verifyPermission(handle, opts = { mode: 'readwrite' }) {
     if ((await handle.queryPermission(opts)) === 'granted') return true;
@@ -195,37 +147,6 @@
     return false;
   }
 
-  async function getHandleFromPath(pathStr) {
-    if (!rootHandle) throw new Error('Root not selected');
-    const parts = pathStr.split('/').filter(Boolean);
-    if (parts.length === 0) return rootHandle;
-
-    let current = rootHandle;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      const isLast = i === parts.length - 1;
-
-      // Try as directory first
-      try {
-        current = await current.getDirectoryHandle(part);
-        continue;
-      } catch (_) {
-        // Not a directory; try file if last
-        if (isLast) {
-          try {
-            current = await current.getFileHandle(part);
-            return current;
-          } catch (e) {
-            throw new Error('Path not found: ' + pathStr);
-          }
-        } else {
-          throw new Error('Directory not found: ' + parts.slice(0, i+1).join('/'));
-        }
-      }
-    }
-    return current;
-  }
-
   async function getDirectoryHandleFromParts(parts, create=false) {
     let current = rootHandle;
     for (const p of parts) {
@@ -234,175 +155,6 @@
     return current;
   }
 
-  async function ensureParentDirs(dirHandle, parts) {
-    let current = dirHandle;
-    for (const p of parts) {
-      current = await current.getDirectoryHandle(p, { create: true });
-    }
-    return current;
-  }
-
-  async function listEntries(startHandle, recursive) {
-    const results = [];
-    async function walkDirectory(dirHandle, prefix) {
-      for await (const entry of dirHandle.values()) {
-        const fullPath = prefix ? prefix + '/' + entry.name : entry.name;
-        if (entry.kind === 'file') {
-          results.push({ type: 'file', path: fullPath });
-        } else if (entry.kind === 'directory') {
-          results.push({ type: 'dir', path: fullPath });
-          if (recursive) {
-            await walkDirectory(entry, fullPath);
-          }
-        }
-      }
-    }
-    if (startHandle.kind === 'file') {
-      results.push({ type: 'file', path: '' });
-    } else {
-      await walkDirectory(startHandle, '');
-    }
-    return results;
-  }
-
-  function renderTree(entries) {
-    const sort = (a, b) => {
-      if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
-      return a.path.localeCompare(b.path);
-    };
-    entries.sort(sort);
-    const lines = entries.map(e => (e.type === 'dir' ? '📁 ' : '📄 ') + e.path);
-    return lines.join('\\n');
-  }
-
-  // Picker
-  el('btnPickRoot').addEventListener('click', async () => {
-    try {
-      rootHandle = await window.showDirectoryPicker({ id: 'ai-ide-root' });
-      const ok = await verifyPermission(rootHandle, { mode: 'readwrite' });
-      if (!ok) throw new Error('Permission not granted');
-      showRoot();
-      log('Selected root directory.');
-    } catch (e) {
-      log('Failed to select root:', e.message || e);
-      setStatus('rootStatus', 'Root selection failed: ' + (e.message || e), 'err');
-    }
-  });
-
-  el('btnForgetRoot').addEventListener('click', async () => {
-    // No standard way to revoke permissions programmatically.
-    rootHandle = null;
-    showRoot();
-    log('Cleared root handle reference. To fully revoke, clear site data in your browser.');
-  });
-
-  // list_files
-  el('btnList').addEventListener('click', async () => {
-    setStatus('listStatus', '');
-    el('listOutput').textContent = '';
-    try {
-      if (!rootHandle) throw new Error('Select a root directory first.');
-      const rel = (el('listPath').value || '').trim();
-      const recursive = el('chkRecursive').checked;
-      log('list_files:', JSON.stringify({ path: rel || '.', recursive }));
-
-      let startHandle = rootHandle;
-      if (rel) {
-        const parts = rel.split('/').filter(Boolean);
-        let current = rootHandle;
-        for (const p of parts) {
-          current = await current.getDirectoryHandle(p);
-        }
-        startHandle = current;
-      }
-
-      const entries = await listEntries(startHandle, recursive);
-      el('listOutput').textContent = renderTree(entries);
-      setStatus('listStatus', `Listed ${entries.length} entries`, 'ok');
-    } catch (e) {
-      setStatus('listStatus', e.message || String(e), 'err');
-      log('list_files error:', e.message || e);
-    }
-  });
-
-  // read_file
-  el('btnRead').addEventListener('click', async () => {
-    setStatus('readStatus', '');
-    el('readOutput').textContent = '';
-    try {
-      if (!rootHandle) throw new Error('Select a root directory first.');
-      const filePath = (el('readPath').value || '').trim();
-      if (!filePath) throw new Error('Please enter a relative file path to read.');
-      log('read_file:', JSON.stringify({ filename: filePath }));
-
-      const parts = filePath.split('/').filter(Boolean);
-      let current = rootHandle;
-      for (let i = 0; i < parts.length - 1; i++) {
-        current = await current.getDirectoryHandle(parts[i]);
-      }
-      const fh = await current.getFileHandle(parts[parts.length - 1]);
-      const file = await fh.getFile();
-      const text = await file.text();
-
-      el('readOutput').textContent = text;
-      setStatus('readStatus', `Read ${file.size} bytes`, 'ok');
-    } catch (e) {
-      setStatus('readStatus', e.message || String(e), 'err');
-      log('read_file error:', e.message || e);
-    }
-  });
-
-  // write_to_file / append
-  el('btnWrite').addEventListener('click', async () => {
-    await writeInternal(false);
-  });
-  el('btnAppend').addEventListener('click', async () => {
-    await writeInternal(true);
-  });
-
-  async function writeInternal(append) {
-    setStatus('writeStatus', '');
-    try {
-      if (!rootHandle) throw new Error('Select a root directory first.');
-      const filePath = (el('writePath').value || '').trim();
-      const content = el('writeContent').value ?? '';
-      if (!filePath) throw new Error('Please enter a relative file path to write.');
-      log(append ? 'append_to_file:' : 'write_to_file:', JSON.stringify({ filename: filePath, contentPreview: content.slice(0, 80) + (content.length > 80 ? '…' : '') }));
-
-      const parts = filePath.split('/').filter(Boolean);
-      const filename = parts.pop();
-      const parent = await ensureParentDirs(rootHandle, parts);
-      const fh = await parent.getFileHandle(filename, { create: true });
-
-      let newContent = content;
-      if (append) {
-        try {
-          const existing = await (await fh.getFile()).text();
-          newContent = existing + content;
-        } catch (_) {
-          // If doesn't exist or unreadable, just write new content
-        }
-      }
-
-      const writable = await fh.createWritable();
-      await writable.write(newContent);
-      await writable.close();
-
-      setStatus('writeStatus', append ? 'Append successful' : 'Write successful', 'ok');
-    } catch (e) {
-      setStatus('writeStatus', e.message || String(e), 'err');
-      log('write_to_file error:', e.message || e);
-    }
-  }
-
-  // Helpers for search/lines/rename
-  async function getDirectoryHandleFromParts(parts, create=false) {
-    let current = rootHandle;
-    for (const p of parts) {
-      current = await current.getDirectoryHandle(p, { create });
-    }
-    return current;
-  }
   async function getFileHandleByPath(pathStr, create=false) {
     const parts = pathStr.split('/').filter(Boolean);
     if (parts.length === 0) throw new Error('Invalid path');
@@ -411,11 +163,12 @@
     const fh = await parent.getFileHandle(filename, { create });
     return fh;
   }
+
   function toLines(text) {
     return text.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').split('\\n');
   }
 
-  // search_in_file
+  // search_in_file implementation (client-side)
   el('btnSearch').addEventListener('click', async () => {
     setStatus('searchStatus', '');
     el('searchOutput').textContent = '';
@@ -446,6 +199,7 @@
       const out = [];
       for (let i = 0; i < lines.length; i++) {
         if (matcher(lines[i])) {
+          // include context
           const start = Math.max(0, i - context);
           const end = Math.min(lines.length - 1, i + context);
           for (let j = start; j <= end; j++) {
@@ -462,7 +216,7 @@
     }
   });
 
-  // read_file_lines
+  // read_file_lines implementation (client-side)
   el('btnReadLines').addEventListener('click', async () => {
     setStatus('linesStatus', '');
     el('linesOutput').textContent = '';
@@ -495,7 +249,7 @@
     }
   });
 
-  // rename_file (copy + delete)
+  // rename_file implementation (copy + delete)
   el('btnRename').addEventListener('click', async () => {
     setStatus('renameStatus', '');
     try{
@@ -523,6 +277,7 @@
       await writable.close();
 
       // Delete old file
+      // Need directory handle of old file
       const oldParts = oldPath.split('/').filter(Boolean);
       const oldName = oldParts.pop();
       const oldParent = await getDirectoryHandleFromParts(oldParts, false);
@@ -535,7 +290,26 @@
     }
   });
 
-  // Initialize
+  // Picker
+  el('btnPickRoot').addEventListener('click', async () => {
+    try{
+      rootHandle = await window.showDirectoryPicker({ id: 'ai-ide-root' });
+      const ok = await verifyPermission(rootHandle, { mode: 'readwrite' });
+      if (!ok) throw new Error('Permission not granted');
+      showRoot();
+      log('Selected root directory.');
+    }catch(e){
+      log('Failed to select root:', e.message || e);
+      setStatus('rootStatus', 'Root selection failed: ' + (e.message || e), 'err');
+    }
+  });
+  el('btnForgetRoot').addEventListener('click', () => {
+    rootHandle = null;
+    showRoot();
+    log('Cleared root handle reference. To fully revoke, clear site data in your browser.');
+  });
+
+  // init
   showRoot();
 })();
 </script>

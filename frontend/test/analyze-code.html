@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Test: Analyze Code (Guide)</title>
+  <style>
+    :root{
+      --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--ok:#10b981;--danger:#ef4444;--border:#232838;--code:#0b0e14;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    header{padding:20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(59,130,246,0.10),transparent 60%)}
+    h1{margin:0 0 6px;font-size:20px}
+    .subtitle{color:var(--muted);font-size:13px}
+    main{max-width:980px;margin:0 auto;padding:20px}
+    a.back{display:inline-block;margin:8px 0 14px;color:#93c5fd;text-decoration:none;font-size:13px}
+    a.back:hover{text-decoration:underline}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+    .panel h2{font-size:16px;margin:0 0 8px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+    .row input[type="text"]{
+      background:#0f131c;border:1px solid var(--border);color:#e5e7eb;border-radius:8px;padding:8px;font-size:13px;width:100%
+    }
+    .btn{
+      display:inline-block;text-decoration:none;border:1px solid rgba(59,130,246,0.35);
+      background:rgba(59,130,246,0.15);color:#dbeafe;padding:8px 12px;border-radius:8px;font-size:14px;cursor:pointer
+    }
+    .btn:hover{background:rgba(59,130,246,0.25)}
+    .code{
+      background:var(--code);border:1px solid var(--border);border-radius:8px;padding:10px;
+      white-space:pre-wrap;color:#cbd5e1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px
+    }
+    .note{color:var(--muted);font-size:12px;margin-top:8px}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Analyze Code Test (Guide)</h1>
+  <div class="subtitle">Run the analyze_code tool from inside the main editor app UI or via the browser console.</div>
+</header>
+
+<main>
+  <a class="back" href="./index.html">&#8592; Back to Test Listing</a>
+
+  <section class="panel">
+    <h2>1) Open the Editor App</h2>
+    <div class="row">
+      <a class="btn" href="../index.html" target="_blank" rel="noopener noreferrer">Open Editor App</a>
+    </div>
+    <div class="note">Ensure the backend is running at http://localhost:3333/ and the project is loaded.</div>
+  </section>
+
+  <section class="panel">
+    <h2>2) Use AI Chat or Browser Console</h2>
+    <div class="note">You can trigger analyze_code via the Chat or directly from DevTools Console.</div>
+    <div class="row">
+      <input id="fileInput" type="text" placeholder="Relative JS/TS path to analyze (e.g., frontend/js/tool_executor.js)"/>
+      <button id="btnMakeSnippet" class="btn">Generate Console Snippet</button>
+    </div>
+    <div class="note">Chat prompt example:</div>
+    <div class="code">analyze_code:
+- filename: "frontend/js/tool_executor.js"</div>
+
+    <div class="note" style="margin-top:10px">Console snippet (copy-paste into the Editor App tab Console):</div>
+    <div id="snippet" class="code">import("/js/tool_executor.js").then(async m => {
+  const result = await m.execute({ name: "analyze_code", args: { filename: "frontend/js/tool_executor.js" } }, null, false);
+  console.log(result);
+});</div>
+  </section>
+
+  <section class="panel">
+    <h2>3) Expected Output</h2>
+    <div class="note">A JSON payload describing the file structure: exports, functions, classes, and other insights. If the file is not JS/TS, the tool will error.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Troubleshooting</h2>
+    <ul class="note">
+      <li>Only JavaScript/TypeScript files are supported by analyze_code.</li>
+      <li>Make sure the path is relative to the project root (do not include the root directory name).</li>
+      <li>If you see permission errors, reload the editor app and try again.</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+(function(){
+  const el = id => document.getElementById(id);
+  el('btnMakeSnippet').addEventListener('click', () => {
+    const path = (el('fileInput').value || 'frontend/js/tool_executor.js').trim();
+    el('snippet').textContent =
+`import("/js/tool_executor.js").then(async m => {
+  const result = await m.execute({ name: "analyze_code", args: { filename: "${path}" } }, null, false);
+  console.log(result);
+});`;
+  });
+})();
+</script>
+</body>
+</html>
