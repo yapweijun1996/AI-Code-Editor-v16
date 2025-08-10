@@ -97,6 +97,189 @@ export function initializeEventListeners(appState) {
         setTimeout(saveCurrentSession, 100);
     });
 
+    // Tab Context Menu
+    let currentContextFilePath = null;
+    let focusedMenuItemIndex = -1;
+    const tabContextMenu = document.getElementById('tab-context-menu');
+    
+    function showTabContextMenu(x, y, filePath) {
+        currentContextFilePath = filePath;
+        focusedMenuItemIndex = -1;
+        
+        // Highlight the target tab
+        const allTabs = Array.from(tabBarContainer.querySelectorAll('.tab'));
+        const openFilePaths = Array.from(Editor.getOpenFiles().keys());
+        const targetTabIndex = openFilePaths.indexOf(filePath);
+        
+        if (targetTabIndex >= 0 && targetTabIndex < allTabs.length) {
+            allTabs[targetTabIndex].classList.add('context-menu-target');
+        }
+        
+        // Position the context menu with bounds checking
+        const menuRect = tabContextMenu.getBoundingClientRect();
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        
+        let menuX = x;
+        let menuY = y;
+        
+        // Adjust position to keep menu within viewport
+        if (menuX + 180 > viewportWidth) {
+            menuX = viewportWidth - 180 - 10;
+        }
+        if (menuY + 200 > viewportHeight) {
+            menuY = viewportHeight - 200 - 10;
+        }
+        
+        tabContextMenu.style.left = `${menuX}px`;
+        tabContextMenu.style.top = `${menuY}px`;
+        tabContextMenu.style.display = 'block';
+        
+        // Update menu item states
+        updateContextMenuStates();
+        
+        // Trigger animation
+        requestAnimationFrame(() => {
+            tabContextMenu.classList.add('show');
+        });
+    }
+    
+    function hideTabContextMenu() {
+        // Remove highlight from all tabs
+        const allTabs = Array.from(tabBarContainer.querySelectorAll('.tab'));
+        allTabs.forEach(tab => tab.classList.remove('context-menu-target'));
+        
+        tabContextMenu.classList.remove('show');
+        setTimeout(() => {
+            tabContextMenu.style.display = 'none';
+            currentContextFilePath = null;
+            focusedMenuItemIndex = -1;
+        }, 150);
+    }
+    
+    // Right-click event handler for tabs
+    tabBarContainer.addEventListener('contextmenu', (e) => {
+        // Check if the right-click was on a tab
+        const clickedTab = e.target.closest('.tab');
+        if (!clickedTab) return;
+        
+        e.preventDefault();
+        
+        // Find the file path from the tab element
+        const allTabs = Array.from(tabBarContainer.querySelectorAll('.tab'));
+        const tabIndex = allTabs.indexOf(clickedTab);
+        const openFilePaths = Array.from(Editor.getOpenFiles().keys());
+        
+        if (tabIndex >= 0 && tabIndex < openFilePaths.length) {
+            showTabContextMenu(e.pageX, e.pageY, openFilePaths[tabIndex]);
+        }
+    });
+    
+    // Context menu item click handlers
+    tabContextMenu.addEventListener('click', (e) => {
+        const action = e.target.getAttribute('data-action');
+        if (!action || !currentContextFilePath) return;
+        
+        const tabBarContainer = document.getElementById('tab-bar');
+        
+        switch (action) {
+            case 'close':
+                Editor.closeTab(currentContextFilePath, tabBarContainer);
+                break;
+            case 'close-others':
+                Editor.closeOtherTabs(currentContextFilePath, tabBarContainer);
+                break;
+            case 'close-all':
+                Editor.closeAllTabs(tabBarContainer);
+                break;
+            case 'close-left':
+                Editor.closeTabsToLeft(currentContextFilePath, tabBarContainer);
+                break;
+            case 'close-right':
+                Editor.closeTabsToRight(currentContextFilePath, tabBarContainer);
+                break;
+        }
+        
+        // Hide the context menu
+        hideTabContextMenu();
+    });
+    
+    // Hide context menu when clicking elsewhere
+    document.addEventListener('click', (e) => {
+        if (!tabContextMenu.contains(e.target)) {
+            hideTabContextMenu();
+        }
+    });
+    
+    // Keyboard navigation for context menu
+    document.addEventListener('keydown', (e) => {
+        if (tabContextMenu.style.display !== 'block') return;
+        
+        const menuItems = Array.from(tabContextMenu.querySelectorAll('.tab-context-menu-item:not([disabled])'));
+        
+        switch (e.key) {
+            case 'Escape':
+                e.preventDefault();
+                hideTabContextMenu();
+                break;
+                
+            case 'ArrowDown':
+                e.preventDefault();
+                focusedMenuItemIndex = (focusedMenuItemIndex + 1) % menuItems.length;
+                updateMenuFocus(menuItems);
+                break;
+                
+            case 'ArrowUp':
+                e.preventDefault();
+                focusedMenuItemIndex = focusedMenuItemIndex <= 0 ? menuItems.length - 1 : focusedMenuItemIndex - 1;
+                updateMenuFocus(menuItems);
+                break;
+                
+            case 'Enter':
+            case ' ':
+                e.preventDefault();
+                if (focusedMenuItemIndex >= 0 && focusedMenuItemIndex < menuItems.length) {
+                    menuItems[focusedMenuItemIndex].click();
+                }
+                break;
+        }
+    });
+    
+    function updateMenuFocus(menuItems) {
+        // Remove focus from all items
+        menuItems.forEach(item => item.blur());
+        
+        // Focus the current item
+        if (focusedMenuItemIndex >= 0 && focusedMenuItemIndex < menuItems.length) {
+            menuItems[focusedMenuItemIndex].focus();
+        }
+    }
+    
+    // Update context menu item states
+    function updateContextMenuStates() {
+        const openFiles = Editor.getOpenFiles();
+        const openFilePaths = Array.from(openFiles.keys());
+        const currentIndex = openFilePaths.indexOf(currentContextFilePath);
+        
+        // Enable/disable menu items based on context
+        const closeOthersItem = tabContextMenu.querySelector('[data-action="close-others"]');
+        const closeAllItem = tabContextMenu.querySelector('[data-action="close-all"]');
+        const closeLeftItem = tabContextMenu.querySelector('[data-action="close-left"]');
+        const closeRightItem = tabContextMenu.querySelector('[data-action="close-right"]');
+        
+        // Disable "Close Others" if only one tab is open
+        closeOthersItem.disabled = openFilePaths.length <= 1;
+        
+        // Disable "Close All" if no tabs are open (shouldn't happen, but just in case)
+        closeAllItem.disabled = openFilePaths.length === 0;
+        
+        // Disable "Close Left" if this is the first tab
+        closeLeftItem.disabled = currentIndex <= 0;
+        
+        // Disable "Close Right" if this is the last tab
+        closeRightItem.disabled = currentIndex >= openFilePaths.length - 1;
+    }
+
     openDirectoryButton.addEventListener('click', async () => {
         try {
             appState.rootDirectoryHandle = await window.showDirectoryPicker();

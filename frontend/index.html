@@ -129,12 +129,22 @@
             </div>
             <div class="llm-settings-content">
                 <div class="settings-tabs">
-                    <button class="tab-link active" data-tab="gemini-settings">Google Gemini</button>
-                <button class="tab-link" data-tab="openai-settings">OpenAI</button>
-                <button class="tab-link" data-tab="ollama-settings">Ollama</button>
-            </div>
+                    <button class="tab-link active" data-tab="general-settings">General</button>
+                    <button class="tab-link" data-tab="gemini-settings">Google Gemini</button>
+                    <button class="tab-link" data-tab="openai-settings">OpenAI</button>
+                    <button class="tab-link" data-tab="ollama-settings">Ollama</button>
+                </div>
+                
+                <div id="general-settings" class="tab-content active">
+                    <h3>General Settings</h3>
+                    <div class="form-group">
+                        <label for="auto-condense-threshold">Auto-Condense Threshold</label>
+                        <input type="number" id="auto-condense-threshold" class="settings-input" placeholder="e.g., 8000" title="Automatically condense context when token count exceeds this limit. Set to 0 to disable.">
+                        <p class="settings-help-text">Set the token limit for auto-condensing context. 0 disables it.</p>
+                    </div>
+                </div>
 
-            <div id="gemini-settings" class="tab-content active">
+            <div id="gemini-settings" class="tab-content">
                 <h3>Google Gemini Settings</h3>
                 <p>Enter one or more API keys, separated by new lines. They will be stored locally and rotated automatically.</p>
                 <div class="form-group">
@@ -253,6 +263,17 @@
         <input type="text" id="tool-logs-filter" placeholder="Filter by tool name..." class="tool-logs-filter-input">
         <div id="tool-logs-list"></div>
       </div>
+    </div>
+
+    <!-- Tab Context Menu -->
+    <div id="tab-context-menu" class="tab-context-menu">
+      <button class="tab-context-menu-item" data-action="close">Close</button>
+      <div class="tab-context-menu-separator"></div>
+      <button class="tab-context-menu-item" data-action="close-others">Close Others</button>
+      <button class="tab-context-menu-item" data-action="close-left">Close Tabs to the Left</button>
+      <button class="tab-context-menu-item" data-action="close-right">Close Tabs to the Right</button>
+      <div class="tab-context-menu-separator"></div>
+      <button class="tab-context-menu-item" data-action="close-all">Close All</button>
     </div>
 
     <!-- Load diff.js before Monaco loader to ensure Diff is globally available -->

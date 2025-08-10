@@ -762,6 +762,54 @@ export function closeTab(filePath, tabBarContainer) {
     }
 }
 
+// Tab Context Menu Functions
+export function closeOtherTabs(excludeFilePath, tabBarContainer) {
+    const filesToClose = [];
+    for (const filePath of openFiles.keys()) {
+        if (filePath !== excludeFilePath) {
+            filesToClose.push(filePath);
+        }
+    }
+    
+    // Close all other tabs
+    for (const filePath of filesToClose) {
+        closeTab(filePath, tabBarContainer);
+    }
+}
+
+export function closeAllTabs(tabBarContainer) {
+    const filesToClose = Array.from(openFiles.keys());
+    
+    // Close all tabs
+    for (const filePath of filesToClose) {
+        closeTab(filePath, tabBarContainer);
+    }
+}
+
+export function closeTabsToLeft(targetFilePath, tabBarContainer) {
+    const tabOrder = Array.from(openFiles.keys());
+    const targetIndex = tabOrder.indexOf(targetFilePath);
+    
+    if (targetIndex === -1) return;
+    
+    // Close all tabs to the left
+    for (let i = 0; i < targetIndex; i++) {
+        closeTab(tabOrder[i], tabBarContainer);
+    }
+}
+
+export function closeTabsToRight(targetFilePath, tabBarContainer) {
+    const tabOrder = Array.from(openFiles.keys());
+    const targetIndex = tabOrder.indexOf(targetFilePath);
+    
+    if (targetIndex === -1) return;
+    
+    // Close all tabs to the right
+    for (let i = targetIndex + 1; i < tabOrder.length; i++) {
+        closeTab(tabOrder[i], tabBarContainer);
+    }
+}
+
 export async function saveActiveFile() {
     if (!activeFilePath) return;
     try {

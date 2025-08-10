@@ -512,14 +512,15 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
             try {
                 // Increment API turn counter
                 apiTurn++;
-                UI.showThinkingIndicator(chatMessages, 'AI is thinking...');
+                const providerName = this.llmService?.constructor?.name || 'Unknown';
+                UI.showDetailedProgress('AI is processing your request...', 'Preparing request', 10, providerName, totalRequestTokens);
+                UI.updateThinkingProgress('Classifying user intent', 15, 'Analyzing the best way to respond...', 'AI is processing your request...');
                 const mode = document.getElementById('agent-mode-selector').value;
                 const customRules = Settings.get(`custom.${mode}.rules`);
                 
                 // Enhanced tool definitions with smart recommendations
                 let tools = currentUseTools ? ToolExecutor.getToolDefinitions() : [];
                 // Pre-flight: duplicate payload suppression (hash based on provider/tools/directAnalysis/history signature)
-                const providerName = this.llmService?.constructor?.name || 'UnknownProvider';
                 const payloadHash = this._computePayloadHash(providerName, tools, directAnalysis, history);
                 if (payloadHash && payloadHash === this.lastPayloadHash) {
                     this.duplicatePayloadCount = (this.duplicatePayloadCount || 0) + 1;
@@ -552,6 +553,9 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                     }
                 }
                 
+                // Update progress before starting stream
+                UI.updateThinkingProgress('Sending request to AI', 30, 'Waiting for AI response...', 'AI is processing your request...');
+                
                 const stream = this.llmService.sendMessageStream(history, tools, customRules, { directAnalysis });
                 startedStream = true;
  
@@ -560,13 +564,24 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                 functionCalls = []; // Reset for this iteration
                 let seenUsage = false; // Track whether we observed real usage during streaming
 
+                let streamProgress = 50;
+                let chunkCount = 0;
                 for await (const chunk of stream) {
                     if (this.isCancelled) return;
 
                     if (chunk.text) {
+                        if (chunkCount === 0) {
+                            UI.hideThinkingIndicator();
+                        }
                         const text = chunk.text;
                         modelResponseText += text;
                         displayText += text;
+                        chunkCount++;
+                        
+                        // Update streaming progress (50% to 90% based on chunk count)
+                        streamProgress = Math.min(50 + (chunkCount * 2), 90);
+                        UI.updateThinkingProgress('Receiving AI response', streamProgress, `Processing response stream...`, 'AI is processing your request...');
+                        
                         UI.appendMessage(chatMessages, displayText, 'ai', true);
                     }
                     if (chunk.functionCalls) {
@@ -585,6 +600,10 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                             if (typeof usage.prompt_tokens === 'number') totalRequestTokens = usage.prompt_tokens;
                             if (typeof usage.completion_tokens === 'number') totalResponseTokens = usage.completion_tokens;
                         }
+                        
+                        // Update token metrics in real-time
+                        const totalTokens = totalRequestTokens + totalResponseTokens;
+                        UI.updateThinkingMetrics(providerName, totalTokens);
                     }
                 }
 
@@ -596,6 +615,9 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                 
                 console.log(`[Token Usage] Final totals - Req: ${totalRequestTokens}, Res: ${totalResponseTokens}`);
                 UI.updateMetricsBadge(this.sessionTotals);
+                
+                // Update progress when response is complete
+                UI.updateThinkingProgress('Processing AI response', 95, 'Analyzing function calls...', 'AI is processing your request...');
                 
                 // Persist per-request LLM metrics for this provider turn
                 try {
@@ -835,7 +857,8 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                     for (const call of normalizedCalls) {
                         if (this.isCancelled) return;
                         console.log(`Executing tool: ${call.name} sequentially...`);
-                        UI.showThinkingIndicator(chatMessages, `Executing tool: ${call.name}...`);
+                        const progressPercent = 50 + (((executedToolCount + 1) / normalizedCalls.length) * 45); // Scale from 50% to 95%
+                        UI.updateThinkingProgress(`Executing ${call.name}`, progressPercent, `Tool ${executedToolCount + 1} of ${normalizedCalls.length}`, 'AI is processing your request...');
                         const result = await ToolExecutor.execute(call, this.rootDirectoryHandle);
 
                         // Record executed tool name for evidence tracking ONLY on success (no error in response)
@@ -860,6 +883,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                     }
 
                     if (toolResults.length > 0) {
+                        UI.updateThinkingProgress('Finalizing', 100, 'Tools completed successfully', 'AI is processing your request...');
                         history.push({ role: 'user', parts: toolResults.map(functionResponse => ({ functionResponse })) });
                     }
                     
@@ -872,6 +896,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                         continueLoop = hadNormalizedBeforeFiltering && executedToolCount > 0;
                     }
                 } else {
+                    // No tools called, conversation is complete
                     // No tools called, conversation is complete
                     continueLoop = false;
                 }
@@ -973,6 +998,15 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
         }
 
         if ((!userPrompt && !uploadedImage) || this.isSending) return;
+
+        // Auto-condense if threshold is met
+        const threshold = parseInt(Settings.get('general.autoCondenseThreshold'), 10);
+        if (threshold > 0) {
+            const currentTokenCount = this.sessionTotals.totalTokens;
+            if (currentTokenCount > threshold) {
+                await this.condenseHistory(chatMessages, `Context automatically condensed (limit: ${threshold} tokens).`);
+            }
+        }
 
         this.sessionTotals.requests++;
         this.isSending = true;
@@ -1382,8 +1416,8 @@ Execute this task step by step. When completed, call the task_update tool to mar
         await this._initializeLLMService();
     },
 
-    async condenseHistory(chatMessages) {
-        UI.appendMessage(chatMessages, 'Condensing history... This will start a new session.', 'ai');
+    async condenseHistory(chatMessages, condensationMessage = 'Condensing history... This will start a new session.') {
+        UI.appendMessage(chatMessages, condensationMessage, 'ai');
         const history = await DbManager.getChatHistory();
         if (history.length === 0) {
             UI.appendMessage(chatMessages, 'History is already empty.', 'ai');
@@ -1407,7 +1441,23 @@ Execute this task step by step. When completed, call the task_update tool to mar
         UI.appendMessage(chatMessages, 'Original conversation history has been condensed.', 'ai');
         UI.appendMessage(chatMessages, summaryText, 'ai');
 
-        await this._startChat();
+        const newHistory = [{ role: 'model', parts: [{ text: summaryText }] }];
+        await DbManager.saveChatHistory(newHistory);
+
+        // Recalculate and update token count
+        if (typeof GPTTokenizer_cl100k_base !== 'undefined') {
+            const { encode } = GPTTokenizer_cl100k_base;
+            const summaryTokens = encode(summaryText).length;
+            this.sessionTotals = {
+                requests: 0, // Reset request count for the new session
+                inputTokens: summaryTokens,
+                outputTokens: 0,
+                totalTokens: summaryTokens,
+            };
+            UI.updateMetricsBadge(this.sessionTotals);
+        }
+
+        await this._startChat(newHistory);
     },
 
     async viewHistory() {

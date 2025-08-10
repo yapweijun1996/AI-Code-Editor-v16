@@ -147,36 +147,51 @@ export function updateDirectoryButtons(isConnected, needsReconnect = false) {
 }
 
 export function appendMessage(chatMessages, text, sender, isStreaming = false) {
-    hideThinkingIndicator();
-    let messageDiv;
-    if (isStreaming) {
-        const lastMessage = chatMessages.lastElementChild;
-        if (lastMessage && lastMessage.classList.contains('ai-streaming')) {
-            messageDiv = lastMessage;
+    if (sender === 'ai' && !isStreaming) {
+        hideThinkingIndicator();
+        const streamingMessage = chatMessages.querySelector('.ai-streaming');
+        if (streamingMessage) {
+            streamingMessage.classList.remove('ai-streaming');
         }
     }
 
-    if (!messageDiv) {
+    let messageDiv;
+    if (isStreaming && sender === 'ai') {
+        const lastMessage = chatMessages.lastElementChild;
+        if (lastMessage && lastMessage.classList.contains('ai-streaming')) {
+            messageDiv = lastMessage;
+        } else {
+            hideThinkingIndicator();
+            messageDiv = document.createElement('div');
+            messageDiv.className = 'chat-message ai ai-streaming';
+            chatMessages.appendChild(messageDiv);
+        }
+    } else if (!isStreaming) {
+        const lastStreamingMessage = chatMessages.querySelector('.ai-streaming');
+        if (lastStreamingMessage) {
+            lastStreamingMessage.classList.remove('ai-streaming');
+        }
         messageDiv = document.createElement('div');
         messageDiv.className = `chat-message ${sender}`;
-        if (isStreaming) {
-            messageDiv.classList.add('ai-streaming');
-        }
+        chatMessages.appendChild(messageDiv);
+    } else {
+         messageDiv = document.createElement('div');
+        messageDiv.className = `chat-message ${sender}`;
         chatMessages.appendChild(messageDiv);
     }
 
     if (sender === 'ai') {
         messageDiv.innerHTML = DOMPurify.sanitize(marked.parse(text));
-        
+
         const mermaidBlocks = messageDiv.querySelectorAll('pre code.language-mermaid');
         mermaidBlocks.forEach(block => {
             const preElement = block.parentElement;
             const mermaidContent = block.textContent;
-            
+
             const mermaidContainer = document.createElement('div');
             mermaidContainer.className = 'mermaid';
             mermaidContainer.textContent = mermaidContent;
-            
+
             preElement.parentNode.replaceChild(mermaidContainer, preElement);
         });
 
@@ -194,18 +209,97 @@ export function showThinkingIndicator(chatMessages, message = 'Thinking...') {
     if (!thinkingDiv) {
         thinkingDiv = document.createElement('div');
         thinkingDiv.id = 'thinking-indicator';
-        thinkingDiv.className = 'chat-message ai';
+        thinkingDiv.className = 'chat-message ai enhanced-thinking';
         chatMessages.appendChild(thinkingDiv);
     }
-    thinkingDiv.innerHTML = `<div class="loader"></div> <span class="thinking-text">${message}</span>`;
+    
+    thinkingDiv.innerHTML = `
+        <div class="enhanced-thinking-container">
+            <div class="thinking-header">
+                <div class="loader"></div> 
+                <span class="thinking-text" id="thinking-message">${message}</span>
+                <span class="thinking-time" id="thinking-timer">0s</span>
+            </div>
+            <div class="thinking-details" id="thinking-details">
+                <div class="thinking-stage" id="thinking-stage">Initializing...</div>
+                <div class="thinking-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="thinking-progress-fill"></div>
+                    </div>
+                    <span class="progress-text" id="thinking-progress-text">Preparing request</span>
+                </div>
+                <div class="thinking-metrics" id="thinking-metrics">
+                    <span class="metric"><i class="fas fa-clock"></i> <span id="thinking-elapsed">0s</span></span>
+                    <span class="metric"><i class="fas fa-server"></i> <span id="thinking-provider">...</span></span>
+                    <span class="metric"><i class="fas fa-coins"></i> <span id="thinking-tokens">0</span></span>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Start the timer
+    startThinkingTimer();
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 export function hideThinkingIndicator() {
     const thinkingDiv = document.getElementById('thinking-indicator');
     if (thinkingDiv) {
+        stopThinkingTimer();
         thinkingDiv.remove();
     }
+}
+
+// Enhanced thinking indicator functions
+let thinkingStartTime = null;
+let thinkingTimer = null;
+
+function startThinkingTimer() {
+    thinkingStartTime = Date.now();
+    if (thinkingTimer) clearInterval(thinkingTimer);
+    
+    thinkingTimer = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - thinkingStartTime) / 1000);
+        const timerElement = document.getElementById('thinking-timer');
+        const elapsedElement = document.getElementById('thinking-elapsed');
+        
+        if (timerElement) timerElement.textContent = `${elapsed}s`;
+        if (elapsedElement) elapsedElement.textContent = `${elapsed}s`;
+    }, 1000);
+}
+
+function stopThinkingTimer() {
+    if (thinkingTimer) {
+        clearInterval(thinkingTimer);
+        thinkingTimer = null;
+    }
+    thinkingStartTime = null;
+}
+
+export function updateThinkingProgress(stage, progress = 0, details = '', message = null) {
+    const stageElement = document.getElementById('thinking-stage');
+    const progressFill = document.getElementById('thinking-progress-fill');
+    const progressText = document.getElementById('thinking-progress-text');
+    const messageElement = document.getElementById('thinking-message');
+
+    if (stageElement) stageElement.textContent = stage;
+    if (progressFill) progressFill.style.width = `${Math.min(progress, 100)}%`;
+    if (progressText) progressText.textContent = details || stage;
+    if (messageElement && message) messageElement.textContent = message;
+}
+
+export function updateThinkingMetrics(provider, tokenCount) {
+    const providerElement = document.getElementById('thinking-provider');
+    const tokensElement = document.getElementById('thinking-tokens');
+    
+    if (providerElement) providerElement.textContent = provider || '...';
+    if (tokensElement) tokensElement.textContent = tokenCount || '0';
+}
+
+export function showDetailedProgress(message, stage, progress, provider, tokens) {
+    showThinkingIndicator(document.getElementById('chat-messages'), message);
+    updateThinkingProgress(stage, progress, null, message);
+    updateThinkingMetrics(provider, tokens);
 }
 
 export function appendToolLog(chatMessages, toolName, params) {
@@ -438,6 +532,7 @@ export async function saveLLMSettings() {
         'llm.openai.model': document.getElementById('openai-model-selector').value,
         'llm.ollama.baseURL': document.getElementById('ollama-base-url').value,
         'llm.ollama.model': document.getElementById('ollama-model-name').value,
+        'general.autoCondenseThreshold': document.getElementById('auto-condense-threshold').value,
     };
 
     await Settings.setMultiple(settingsToSave);
@@ -454,6 +549,7 @@ export function loadLLMSettings() {
     document.getElementById('openai-model-selector').value = Settings.get('llm.openai.model');
     document.getElementById('ollama-base-url').value = Settings.get('llm.ollama.baseURL');
     document.getElementById('ollama-model-name').value = Settings.get('llm.ollama.model');
+    document.getElementById('auto-condense-threshold').value = Settings.get('general.autoCondenseThreshold') || '';
     
     const provider = Settings.get('llm.provider');
     document.querySelectorAll('.settings-tabs .tab-link').forEach(tab => {
@@ -462,6 +558,11 @@ export function loadLLMSettings() {
     document.querySelectorAll('.tab-content').forEach(content => {
         content.classList.toggle('active', content.id === `${provider}-settings`);
     });
+    // Make general settings active by default if no provider is selected
+    if (!provider) {
+       document.querySelector('.tab-link[data-tab="general-settings"]').classList.add('active');
+       document.getElementById('general-settings').classList.add('active');
+    }
 }
 
 export function showToast(message, type = 'success', duration = 3000) {

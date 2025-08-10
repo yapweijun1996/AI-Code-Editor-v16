@@ -204,6 +204,19 @@ body.resizing {
 
 .tab:hover {
   background-color: var(--editor-tab-active-bg);
+  position: relative;
+}
+
+.tab:hover::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 4px;
+  height: 4px;
+  background-color: var(--text);
+  border-radius: 50%;
+  opacity: 0.4;
 }
 
 .tab-close-btn {
@@ -218,6 +231,117 @@ body.resizing {
 
 .tab-close-btn:hover {
   opacity: 1;
+}
+
+/* Tab Context Menu */
+.tab-context-menu {
+  position: absolute;
+  background-color: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 
+    0 4px 12px rgba(0, 0, 0, 0.15),
+    0 2px 4px rgba(0, 0, 0, 0.1),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+  z-index: 9999;
+  min-width: 180px;
+  padding: 6px 0;
+  display: none;
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  transform: scale(0.95) translateY(-4px);
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.tab-context-menu.show {
+  display: block;
+  opacity: 1;
+  transform: scale(1) translateY(0);
+}
+
+.tab-context-menu-item {
+  padding: 10px 16px;
+  cursor: pointer;
+  color: var(--text);
+  background-color: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+  font-family: var(--font-family-main);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: all 0.1s ease;
+  outline: none;
+  position: relative;
+}
+
+.tab-context-menu-item:hover {
+  background-color: var(--primary);
+  color: white;
+}
+
+.tab-context-menu-item:focus {
+  background-color: var(--primary);
+  color: white;
+}
+
+.tab-context-menu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--secondary);
+}
+
+.tab-context-menu-item:disabled:hover,
+.tab-context-menu-item:disabled:focus {
+  background-color: transparent;
+  color: var(--secondary);
+}
+
+.tab-context-menu-item::before {
+  content: '';
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.tab-context-menu-item[data-action="close"]::before {
+  content: '✕';
+}
+
+.tab-context-menu-item[data-action="close-others"]::before {
+  content: '⧉';
+}
+
+.tab-context-menu-item[data-action="close-all"]::before {
+  content: '⊠';
+}
+
+.tab-context-menu-item[data-action="close-left"]::before {
+  content: '◀';
+}
+
+.tab-context-menu-item[data-action="close-right"]::before {
+  content: '▶';
+}
+
+.tab-context-menu-separator {
+  height: 1px;
+  background-color: var(--border);
+  margin: 4px 0;
+  opacity: 0.6;
+}
+
+.tab.context-menu-target {
+  background-color: var(--primary);
+  color: white;
+  box-shadow: 0 0 0 1px var(--primary-hover);
 }
 
 #editor {
@@ -1348,6 +1472,121 @@ button:hover {
     width: 16px;
     height: 16px;
     animation: spin 1s linear infinite;
+}
+
+/* Enhanced Thinking Indicator Styles */
+.enhanced-thinking-container {
+    width: 100%;
+    padding: 16px;
+    background: var(--input-background);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    margin: 8px 0;
+}
+
+.thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.thinking-header .loader {
+    border: 2px solid var(--background-color-secondary);
+    border-top: 2px solid var(--primary-color);
+    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    animation: spin 1s linear infinite;
+}
+
+.thinking-text {
+    font-weight: 600;
+    color: var(--text-color);
+    flex-grow: 1;
+}
+
+.thinking-time {
+    font-size: 0.9em;
+    color: var(--text-secondary);
+    background: var(--background-color-secondary);
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-family: monospace;
+}
+
+.thinking-details {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.thinking-stage {
+    font-size: 0.9em;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.thinking-progress {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.progress-bar {
+    flex-grow: 1;
+    height: 4px;
+    background: var(--background-color-secondary);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary-color), var(--accent-color));
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.progress-text {
+    font-size: 0.85em;
+    color: var(--text-secondary);
+    min-width: 120px;
+    text-align: right;
+}
+
+.thinking-metrics {
+    display: flex;
+    gap: 16px;
+    font-size: 0.85em;
+}
+
+.thinking-metrics .metric {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+}
+
+.thinking-metrics .metric i {
+    color: var(--primary-color);
+    width: 12px;
+}
+
+/* Animation for enhanced thinking indicator */
+@keyframes pulse-glow {
+    0%, 100% { 
+        box-shadow: 0 0 5px rgba(var(--primary-color-rgb), 0.3);
+    }
+    50% { 
+        box-shadow: 0 0 15px rgba(var(--primary-color-rgb), 0.6), 
+                    0 0 25px rgba(var(--primary-color-rgb), 0.3);
+    }
+}
+
+.enhanced-thinking-container {
+    animation: pulse-glow 3s ease-in-out infinite;
 }
 
 /* ================================
