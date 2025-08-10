@@ -307,22 +307,6 @@ export function renderChatHistory(chatMessagesContainer, history) {
         }
     });
 }
-export function updateTokenDisplay(requestTokens, responseTokens) {
-    const display = document.getElementById('token-usage-display');
-    const requestEl = document.getElementById('token-request');
-    const responseEl = document.getElementById('token-response');
-    const totalEl = document.getElementById('token-total');
-
-    if (display && requestEl && responseEl && totalEl) {
-        const reqTokens = parseInt(requestTokens, 10) || 0;
-        const resTokens = parseInt(responseTokens, 10) || 0;
-
-        requestEl.textContent = `Req: ${reqTokens}`;
-        responseEl.textContent = `Res: ${resTokens}`;
-        totalEl.textContent = `Total: ${reqTokens + resTokens}`;
-        display.style.display = 'flex';
-    }
-}
 
 export function displayRules(chatMessagesContainer, rules, modeName) {
     const rulesDiv = document.createElement('div');
@@ -545,22 +529,43 @@ export function initializeUI() {
     
     // LLM Provider Status Display & Settings Toggle
     updateLLMProviderStatus();
+    updateMetricsBadge(); // Initialize the badge on startup
     const llmStatusContainer = document.getElementById('llm-status-container');
     const settingsToggleButton = document.getElementById('settings-toggle-button');
     const llmSettingsPanel = document.getElementById('llm-settings-panel');
     const saveSettingsButton = document.getElementById('save-llm-settings-button');
+    const closeSettingsButton = document.getElementById('close-settings-panel-button');
 
     if (settingsToggleButton && llmSettingsPanel) {
-        const togglePanel = () => {
-            llmSettingsPanel.classList.toggle('visible');
-            if (llmSettingsPanel.classList.contains('visible')) {
+        const togglePanel = (show) => {
+            llmSettingsPanel.classList.toggle('visible', show);
+            if (show) {
                 loadLLMSettings();
             }
         };
-        settingsToggleButton.addEventListener('click', togglePanel);
+
+        settingsToggleButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            togglePanel(!llmSettingsPanel.classList.contains('visible'));
+        });
+
         if (llmStatusContainer) {
-            llmStatusContainer.addEventListener('click', togglePanel);
+            llmStatusContainer.addEventListener('click', (e) => {
+                e.stopPropagation();
+                togglePanel(!llmSettingsPanel.classList.contains('visible'));
+            });
         }
+
+        if (closeSettingsButton) {
+            closeSettingsButton.addEventListener('click', () => togglePanel(false));
+        }
+
+        // Close when clicking outside
+        document.addEventListener('click', (e) => {
+            if (llmSettingsPanel.classList.contains('visible') && !llmSettingsPanel.contains(e.target) && !settingsToggleButton.contains(e.target) && !llmStatusContainer.contains(e.target)) {
+                togglePanel(false);
+            }
+        });
     }
 
     if (saveSettingsButton) {
@@ -680,14 +685,10 @@ export function updateMetricsBadge(totals = { requests: 0, inputTokens: 0, outpu
             badge = document.createElement('div');
             badge.id = 'metrics-badge';
             // Positioning and style
-            badge.style.position = 'fixed';
-            badge.style.bottom = '12px';
-            badge.style.right = '12px';
-            badge.style.zIndex = '9999';
-            badge.style.background = 'rgba(0, 0, 0, 0.75)';
-            badge.style.color = '#fff';
-            badge.style.padding = '6px 10px';
-            badge.style.borderRadius = '12px';
+            badge.style.background = 'none';
+            badge.style.color = 'inherit';
+            badge.style.padding = '0';
+            badge.style.borderRadius = '0';
             badge.style.fontSize = '12px';
             badge.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
             badge.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
@@ -695,10 +696,20 @@ export function updateMetricsBadge(totals = { requests: 0, inputTokens: 0, outpu
             badge.style.userSelect = 'none';
             badge.title = 'Click to view aggregate metrics';
             badge.onclick = () => toggleMetricsDrawer();
-            document.body.appendChild(badge);
+            const headerToolbar = document.querySelector('.chat-header .header-toolbar');
+            if (headerToolbar) {
+                headerToolbar.appendChild(badge);
+            } else {
+                document.body.appendChild(badge); // Fallback
+            }
         }
         const fmt = (n) => (Number.isFinite(n) ? n : 0).toLocaleString();
-        badge.textContent = `LLM: Req ${fmt(totals.requests)} • In ${fmt(totals.inputTokens)} • Out ${fmt(totals.outputTokens)} • Total ${fmt(totals.totalTokens)}`;
+        badge.innerHTML = `
+            <span class="metric-item" title="LLM Requests"><i class="fas fa-cogs"></i> ${fmt(totals.requests)}</span>
+            <span class="metric-item" title="Input Tokens"><i class="fas fa-arrow-down"></i> ${fmt(totals.inputTokens)}</span>
+            <span class="metric-item" title="Output Tokens"><i class="fas fa-arrow-up"></i> ${fmt(totals.outputTokens)}</span>
+            <span class="metric-item" title="Total Tokens"><i class="fas fa-equals"></i> ${fmt(totals.totalTokens)}</span>
+        `;
     } catch (e) {
         console.warn('[UI] Failed to update metrics badge:', e?.message || e);
     }

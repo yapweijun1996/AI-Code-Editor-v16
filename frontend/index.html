@@ -72,11 +72,7 @@
           </div>
           <div class="header-toolbar">
             <button id="settings-toggle-button" title="Toggle Settings">⚙️</button>
-            <div class="toolbar-group" id="token-usage-display" style="display: flex;">
-              <span id="token-request">Req: 3333</span>
-              <span id="token-response">Res: 2241</span>
-              <span id="token-total">Total: 5574</span>
-            </div>
+            <div class="toolbar-group" id="metrics-badge"></div>
           </div>
         </div>
         <div id="chat-messages"></div>
@@ -127,8 +123,13 @@
           </div>
         </div>
         <div id="llm-settings-panel">
-            <div class="settings-tabs">
-                <button class="tab-link active" data-tab="gemini-settings">Google Gemini</button>
+            <div class="llm-settings-header">
+                <h3>LLM Settings</h3>
+                <button id="close-settings-panel-button" class="close-button" title="Close Settings">&times;</button>
+            </div>
+            <div class="llm-settings-content">
+                <div class="settings-tabs">
+                    <button class="tab-link active" data-tab="gemini-settings">Google Gemini</button>
                 <button class="tab-link" data-tab="openai-settings">OpenAI</button>
                 <button class="tab-link" data-tab="ollama-settings">Ollama</button>
             </div>
@@ -190,6 +191,7 @@
                 <button id="save-llm-settings-button">Save Settings</button>
                 <button id="theme-toggle-button" title="Toggle Theme"></button>
             </div>
+        </div>
         </div>
     </div>
 </div>

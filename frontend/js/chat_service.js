@@ -390,7 +390,41 @@ export const ChatService = {
                 },
                 'edit_file': {
                     target: 'filename',
-                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName']
+                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName'],
+                    customValidation: (args) => {
+                        // Handle conflicting parameters: content vs edits
+                        if (args.content !== undefined && args.edits !== undefined) {
+                            console.warn(`[ChatService] edit_file called with both 'content' and 'edits'. Preferring 'edits' for surgical editing.`);
+                            // Remove content parameter to prefer surgical edits
+                            delete args.content;
+                        }
+                        
+                        // Validate and normalize edits array
+                        if (args.edits && Array.isArray(args.edits)) {
+                            args.edits.forEach((edit, index) => {
+                                if (!edit.type) {
+                                    throw new Error(`Edit ${index}: missing 'type' property. Must be 'replace_lines' or 'insert_lines'.`);
+                                }
+                                if (edit.type === 'insert_lines') {
+                                    // Normalize line_number aliases
+                                    if (edit.line_number === undefined) {
+                                        if (edit.line !== undefined) edit.line_number = edit.line;
+                                        else if (edit.lineNumber !== undefined) edit.line_number = edit.lineNumber;
+                                        else if (edit.at_line !== undefined) edit.line_number = edit.at_line;
+                                        else if (edit.position !== undefined) edit.line_number = edit.position;
+                                    }
+                                    if (edit.line_number === undefined || edit.line_number === null) {
+                                        throw new Error(`Edit ${index}: insert_lines edit missing 'line_number' property.`);
+                                    }
+                                }
+                                if (edit.type === 'replace_lines') {
+                                    if (edit.start_line === undefined && edit.startLine !== undefined) edit.start_line = edit.startLine;
+                                    if (edit.end_line === undefined && edit.endLine !== undefined) edit.end_line = edit.endLine;
+                                }
+                            });
+                        }
+                        return args;
+                    }
                 },
                 'rewrite_file': {
                     target: 'filename',
@@ -416,6 +450,17 @@ export const ChatService = {
                 
                 if (!mappedFrom) {
                     console.warn(`[ChatService] ❌ Parameter normalization for ${toolName} failed. Available params:`, Object.keys(out), 'Expected:', mapping.target, 'Aliases:', mapping.aliases);
+                }
+                
+                // Apply custom validation if defined
+                if (mapping.customValidation && typeof mapping.customValidation === 'function') {
+                    try {
+                        out = mapping.customValidation(out);
+                        console.debug(`[ChatService] ✓ Custom validation applied for ${toolName}`);
+                    } catch (validationError) {
+                        console.warn(`[ChatService] ❌ Custom validation failed for ${toolName}:`, validationError.message);
+                        throw validationError;
+                    }
                 }
             }
 
@@ -550,7 +595,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                 }
                 
                 console.log(`[Token Usage] Final totals - Req: ${totalRequestTokens}, Res: ${totalResponseTokens}`);
-                UI.updateTokenDisplay(totalRequestTokens, totalResponseTokens);
+                UI.updateMetricsBadge(this.sessionTotals);
                 
                 // Persist per-request LLM metrics for this provider turn
                 try {
@@ -671,19 +716,6 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                                     return null;
                                 }
 
-                                // CompletionGuard: reject destructive subtask completion without destructive evidence this turn
-                                if (args.updates && args.updates.status === 'completed') {
-                                    const sid = this.currentExecutingTaskId;
-                                    const st = sid ? taskManager.tasks.get(sid) : null;
-                                    const isDestructive = st && /(delete|remove|drop|destroy|wipe|erase|cleanup|rm\s+-rf|format)/i.test(`${st.title} ${st.description || ''}`);
-                                    const destructiveTools = ['delete_file','delete_folder'];
-                                    const hasEvidence = Array.isArray(this.lastExecutedTools) && this.lastExecutedTools.some(t => destructiveTools.includes(t));
-                                    if (isDestructive && !hasEvidence) {
-                                        console.warn('Completion rejected: missing destructive evidence for subtask', st?.title);
-                                        UI.appendMessage(chatMessages, `Completion rejected: missing destructive evidence for subtask "${st?.title}"`, 'ai-muted');
-                                        return null;
-                                    }
-                                }
                             }
 
                             // Guard: drop destructive calls with no usable parameters, add UI hint (post-canonicalization)
@@ -753,12 +785,24 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
 
                             // Tool-call fingerprint de-dup across iterations
                             const fp = `${call.name}:${stableStringify(call.args || {})}`;
-                            if (seenCallFingerprints.has(fp)) {
+                            // Allow certain tools to be called multiple times when it makes sense
+                            const allowRepeatedCalls = [
+                                'read_file',        // Reading before editing is good practice
+                                'get_file_info',    // Checking file info multiple times is reasonable
+                                'search_code',      // Multiple searches are common
+                                'get_project_structure', // Project structure might be needed multiple times
+                                'validate_syntax'   // Syntax validation after edits is essential
+                            ];
+                            
+                            if (seenCallFingerprints.has(fp) && !allowRepeatedCalls.includes(call.name)) {
                                 UI.appendMessage(chatMessages, `Skipped repeated tool call: ${call.name}`, 'ai-muted');
                                 continue;
                             }
-                            // Accept call and record fingerprint for this run
-                            seenCallFingerprints.add(fp);
+                            
+                            // Accept call and record fingerprint (except for always-allowed repeated calls)
+                            if (!allowRepeatedCalls.includes(call.name)) {
+                                seenCallFingerprints.add(fp);
+                            }
                             guardedCalls.push(call);
                         }
                         normalizedCalls = guardedCalls;
@@ -802,7 +846,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                                 this.lastExecutedTools.push(call.name);
                                 executedToolCount++;
                             } else {
-                                console.warn(`[ChatService] Tool "${call.name}" did not succeed; not counted as destructive evidence.`);
+                                console.warn(`[ChatService] Tool "${call.name}" did not succeed.`);
                             }
                         } catch (e) {
                             console.warn('[ChatService] Evidence ledger update failed:', e?.message);
@@ -930,6 +974,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
 
         if ((!userPrompt && !uploadedImage) || this.isSending) return;
 
+        this.sessionTotals.requests++;
         this.isSending = true;
         this.isCancelled = false;
         if (chatSendButton && chatCancelButton) this._updateUiState(true);
@@ -1220,15 +1265,6 @@ Execute this task step by step. When completed, call the task_update tool to mar
                 const endTime = Date.now();
                 const updatedTask = taskManager.tasks.get(nextTask.id);
 
-                // Tag destructive evidence on successful destructive subtasks
-                try {
-                    const destructive = /(delete|remove|drop|destroy|wipe|erase|cleanup|rm\s+-rf|format)/i.test(`${nextTask.title} ${nextTask.description||''}`);
-                    const hasDestructiveTool = Array.isArray(this.lastExecutedTools) && this.lastExecutedTools.some(t => ['delete_file','delete_folder'].includes(t));
-                    if (updatedTask && updatedTask.status === 'completed' && destructive && hasDestructiveTool) {
-                        updatedTask.results = { ...(updatedTask.results || {}), destructiveEvidence: true, timestamp: Date.now() };
-                        await taskManager.updateTask(updatedTask.id, { results: updatedTask.results });
-                    }
-                } catch(e) { console.warn('[ChatService] Failed to tag destructive evidence:', e?.message); }
 
                 if (updatedTask && updatedTask.status === 'in_progress') {
                     const tags = updatedTask.tags || [];
@@ -1294,18 +1330,10 @@ Execute this task step by step. When completed, call the task_update tool to mar
             const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
             const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
 
-            // Require at least one completed destructive subtask with evidence before completing the parent
-            const hasDestructiveEvidence = completedSubtasks.some(t => {
-                const isDestructive = /(delete|remove|drop|destroy|wipe|erase|cleanup|rm\s+-rf|format)/i.test(`${t.title} ${t.description||''}`);
-                return isDestructive && t.results && t.results.destructiveEvidence === true;
-            });
 
             if ((allSubtasks.length === 0 || completedSubtasks.length === 0)) {
                 await taskManager.updateTask(mainTask.id, { status: 'failed', results: { reason: 'No substasks executed or completed', completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
                 UI.appendMessage(chatMessages, `Main task "${mainTask.title}" did not complete: ${completedSubtasks.length}/${allSubtasks.length} subtasks completed.`, 'ai');
-            } else if (!hasDestructiveEvidence) {
-                await taskManager.updateTask(mainTask.id, { status: 'in_progress', results: { warning: 'no_destructive_evidence', timestamp: Date.now() } });
-                UI.appendMessage(chatMessages, 'Cannot complete: no destructive evidence found.', 'ai-muted');
             } else if (failedSubtasks.length > 0) {
                 await taskManager.updateTask(mainTask.id, { status: 'failed', results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
                 UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');

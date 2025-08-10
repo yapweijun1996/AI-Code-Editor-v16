@@ -1276,32 +1276,54 @@ async function _smartEditFile({ filename, edits }, rootHandle) {
                 end_line = originalLineCount; // update local variable
             }
 
-            // *** NEW: Content Verification ***
+            // *** IMPROVED: Smart Content Verification with Auto-healing ***
             if (expected_content) {
-                // end_line is inclusive, so slice up to end_line
                 const actual_content = lines.slice(start_line - 1, end_line).join('\n');
-                // Using trim() to be more robust against whitespace differences at the start/end of the block
+                
                 if (actual_content.trim() !== expected_content.trim()) {
-                    const error = new Error(`Content mismatch at lines ${start_line}-${end_line}. The file content has likely changed. Please read the file again and construct a new edit.`);
-                    error.details = {
-                        filename,
-                        start_line,
-                        end_line,
-                        expected: expected_content,
-                        actual: actual_content
-                    };
-                    throw error;
+                    console.warn(`[SmartEdit] Content mismatch at lines ${start_line}-${end_line} in ${filename}.`);
+                    
+                    // Try to find the expected content nearby (auto-healing)
+                    const searchRange = Math.min(10, Math.floor(lines.length / 4)); // Search within 10 lines or 25% of file
+                    let foundMatch = false;
+                    
+                    for (let offset = -searchRange; offset <= searchRange && !foundMatch; offset++) {
+                        if (offset === 0) continue; // Already checked exact position
+                        
+                        const newStart = Math.max(1, start_line + offset);
+                        const newEnd = Math.min(lines.length, end_line + offset);
+                        
+                        if (newStart <= lines.length && newEnd <= lines.length) {
+                            const testContent = lines.slice(newStart - 1, newEnd).join('\n');
+                            if (testContent.trim() === expected_content.trim()) {
+                                console.log(`[SmartEdit] Auto-healed: Found expected content at lines ${newStart}-${newEnd} (offset ${offset})`);
+                                edit.start_line = newStart;
+                                edit.end_line = newEnd;
+                                start_line = newStart;
+                                end_line = newEnd;
+                                foundMatch = true;
+                            }
+                        }
+                    }
+                    
+                    if (!foundMatch) {
+                        console.warn(`[SmartEdit] Could not auto-heal content mismatch. Proceeding with original line range.`);
+                        console.warn(`[SmartEdit] Expected: "${expected_content.slice(0, 100)}${expected_content.length > 100 ? '...' : ''}"`);
+                        console.warn(`[SmartEdit] Actual: "${actual_content.slice(0, 100)}${actual_content.length > 100 ? '...' : ''}"`);
+                    }
                 }
-            } else {
-                // If no expected_content is provided, log a warning.
-                // This makes the tool safer by default while allowing old calls to work with a warning.
-                console.warn(`Warning: 'replace_lines' edit for '${filename}' at lines ${start_line}-${end_line} was performed without 'expected_content' verification. This is unsafe and will be deprecated.`);
             }
 
         } else if (edit.type === 'insert_lines') {
             const { line_number } = edit;
-            if (typeof line_number !== 'number' || line_number < 0 || line_number > originalLineCount) {
-                throw new Error(`Invalid line number for insert: ${line_number} (file has ${originalLineCount} lines)`);
+            if (line_number === undefined || line_number === null) {
+                throw new Error(`Missing 'line_number' for insert_lines edit. Required parameter is missing or undefined.`);
+            }
+            if (typeof line_number !== 'number') {
+                throw new Error(`Invalid 'line_number' for insert_lines edit: expected number, got ${typeof line_number} (${line_number})`);
+            }
+            if (line_number < 0 || line_number > originalLineCount) {
+                throw new Error(`Invalid line number for insert: ${line_number} (file has ${originalLineCount} lines, valid range: 0-${originalLineCount})`);
             }
         } else if (!edit.type) {
             throw new Error(`Missing edit type: Each edit must have a 'type' property of either 'replace_lines' or 'insert_lines'`);

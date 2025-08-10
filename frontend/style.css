@@ -3526,3 +3526,49 @@ button:hover {
     text-overflow: ellipsis;
 }
 
+
+/* Metrics Badge Styles */
+#metrics-badge {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background-color: var(--background-secondary);
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+#metrics-badge:hover {
+    background-color: var(--background-tertiary);
+}
+
+.metric-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.metric-item .fas {
+    font-size: 11px;
+}
+
+.llm-settings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 10px;
+}
+
+.llm-settings-header h3 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.llm-settings-content {
+    padding: 0 12px 12px;
+}

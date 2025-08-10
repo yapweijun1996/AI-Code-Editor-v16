@@ -278,10 +278,14 @@ export class GeminiService extends BaseLLMService {
 **5. AMENDMENT POLICY - CRITICAL COMPANY RULE**
 - **You MUST follow this company policy for all file edits.**
 - **DO NOT DELETE OR REPLACE CODE.** Instead, comment out the original code block.
-- **WRAP NEW CODE** with clear markers:
-    - Start of your edit: \`<!--- Edited by AI [start] --->\`
-    - End of your edit: \`<!--- Edited by AI [end] --->\`
-- **Example:**
+- **WRAP NEW CODE** with clear markers using appropriate comment syntax:
+    - **JavaScript/TypeScript files**: \`// <!--- Edited by AI [start] --->\` and \`// <!--- Edited by AI [end] --->\`
+    - **CSS files**: \`/* Edited by AI [start] */\` and \`/* Edited by AI [end] */\`
+    - **HTML/XML files**: \`<!--- Edited by AI [start] --->\` and \`<!--- Edited by AI [end] --->\`
+    - **Python files**: \`# Edited by AI [start]\` and \`# Edited by AI [end]\`
+- **Examples:**
+    
+    **JavaScript/TypeScript:**
     \`\`\`
     // <!--- Edited by AI [start] --->
     // new code line 1
@@ -290,6 +294,20 @@ export class GeminiService extends BaseLLMService {
     /*
     original code line 1
     original code line 2
+    */
+    \`\`\`
+    
+    **CSS:**
+    \`\`\`
+    /* Edited by AI [start] */
+    .new-class {
+        color: blue;
+    }
+    /* Edited by AI [end] */
+    /*
+    .old-class {
+        color: red;
+    }
     */
     \`\`\`
 
