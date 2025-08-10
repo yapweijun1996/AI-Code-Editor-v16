@@ -147,8 +147,9 @@ export function updateDirectoryButtons(isConnected, needsReconnect = false) {
 }
 
 export function appendMessage(chatMessages, text, sender, isStreaming = false) {
+    // Thinking indicator lifecycle is managed centrally in ChatService._performApiCall.
+    // Do not hide it here to avoid premature removal when non-stream AI messages are appended.
     if (sender === 'ai' && !isStreaming) {
-        hideThinkingIndicator();
         const streamingMessage = chatMessages.querySelector('.ai-streaming');
         if (streamingMessage) {
             streamingMessage.classList.remove('ai-streaming');
@@ -161,7 +162,7 @@ export function appendMessage(chatMessages, text, sender, isStreaming = false) {
         if (lastMessage && lastMessage.classList.contains('ai-streaming')) {
             messageDiv = lastMessage;
         } else {
-            hideThinkingIndicator();
+            // Keep thinking indicator visible during streaming; hide after completion.
             messageDiv = document.createElement('div');
             messageDiv.className = 'chat-message ai ai-streaming';
             chatMessages.appendChild(messageDiv);
@@ -216,7 +217,7 @@ export function showThinkingIndicator(chatMessages, message = 'Thinking...') {
     thinkingDiv.innerHTML = `
         <div class="enhanced-thinking-container">
             <div class="thinking-header">
-                <div class="loader"></div> 
+                <div class="loader"></div>
                 <span class="thinking-text" id="thinking-message">${message}</span>
                 <span class="thinking-time" id="thinking-timer">0s</span>
             </div>
@@ -237,6 +238,9 @@ export function showThinkingIndicator(chatMessages, message = 'Thinking...') {
         </div>
     `;
     
+    // Always move indicator to the end so it stays visible even as new messages append
+    chatMessages.appendChild(thinkingDiv);
+
     // Start the timer
     startThinkingTimer();
     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -286,6 +290,14 @@ export function updateThinkingProgress(stage, progress = 0, details = '', messag
     if (progressFill) progressFill.style.width = `${Math.min(progress, 100)}%`;
     if (progressText) progressText.textContent = details || stage;
     if (messageElement && message) messageElement.textContent = message;
+
+    // Keep the indicator pinned at the bottom as progress updates and other messages arrive
+    const container = document.getElementById('chat-messages');
+    const thinkingDiv = document.getElementById('thinking-indicator');
+    if (container && thinkingDiv) {
+        container.appendChild(thinkingDiv); // moves to end if already in DOM
+        container.scrollTop = container.scrollHeight;
+    }
 }
 
 export function updateThinkingMetrics(provider, tokenCount) {

@@ -567,12 +567,10 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                 let streamProgress = 50;
                 let chunkCount = 0;
                 for await (const chunk of stream) {
-                    if (this.isCancelled) return;
+                    if (this.isCancelled) { UI.hideThinkingIndicator(); return; }
 
                     if (chunk.text) {
-                        if (chunkCount === 0) {
-                            UI.hideThinkingIndicator();
-                        }
+                        // Keep thinking indicator visible during streaming; it will be hidden when processing completes.
                         const text = chunk.text;
                         modelResponseText += text;
                         displayText += text;
@@ -906,6 +904,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                 console.error(`Error during API call with ${this.llmService.constructor.name}:`, error);
                 console.error(`Error stack:`, error.stack); // Log the stack trace
                 UI.showError(`An error occurred during AI communication: ${error.message}. Please check your API key and network connection.`);
+                UI.hideThinkingIndicator();
                 // Attempt to persist metrics even on error if a stream was started
                 try {
                     if (startedStream && !metricsRecorded) {
@@ -942,6 +941,9 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
                 continueLoop = false;
             }
         }
+
+        // Ensure thinking indicator is hidden at the end of processing
+        UI.hideThinkingIndicator();
 
         // Only save to DB if it's not part of an autonomous plan
         if (!this.activePlan) {
@@ -1018,6 +1020,15 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
             // 1. Render user message immediately
             this._prepareAndRenderUserMessage(chatInput, chatMessages, uploadedImage, clearImagePreview);
             
+            // Show thinking indicator early for classification phase
+            try {
+                const providerName = this.llmService?.constructor?.name || 'Unknown';
+                UI.showDetailedProgress('AI is processing your request...', 'Classifying user intent', 15, providerName, 0);
+            } catch (e) {
+                // Non-fatal: if UI not ready, continue
+                console.warn('[ChatService] Failed to show early thinking indicator:', e?.message || e);
+            }
+            
             // 2. AI-driven intent classification
             this.currentHistory = await DbManager.getChatHistory();
             const classificationResult = await this._classifyMessageIntent(userPrompt, this._getRecentContext());
@@ -1054,6 +1065,7 @@ const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
             }
         } catch (error) {
             UI.showError(`An error occurred: ${error.message}`);
+            UI.hideThinkingIndicator();
             console.error('Chat Error:', error);
         } finally {
             this.isSending = false;
@@ -1202,7 +1214,14 @@ Reason: [brief explanation]`;
 
         if (toolRequest) {
             UI.appendMessage(chatMessages, `Executing tool: \`${toolRequest.toolName}\`...`, 'ai-muted');
-            await this.runToolDirectly(toolRequest.toolName, toolRequest.params);
+            try {
+                // Keep the thinking indicator visible during tool-only execution, then clear it on completion.
+                UI.updateThinkingProgress(`Executing ${toolRequest.toolName}`, 60, `Running tool...`, 'AI is processing your request...');
+                await this.runToolDirectly(toolRequest.toolName, toolRequest.params);
+            } finally {
+                // Ensure indicator is cleared when no model turn follows
+                UI.hideThinkingIndicator();
+            }
         } else {
             // Fallback if no specific tool command is parsed
             UI.appendMessage(chatMessages, "Could not parse a specific tool command. Treating as a direct question.", 'ai-muted');
