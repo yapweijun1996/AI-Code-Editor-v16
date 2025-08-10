@@ -435,6 +435,24 @@ export const ChatService = {
                                 return { ...call, name: 'get_project_structure', args: {} };
                             }
 
+                            // Destructive tools: normalize common miskeys to 'path'
+                            if (name === 'delete_file' || name === 'delete_folder') {
+                                const pathKeys = ['path','filename','file','file_path','filepath','target','folder_path','dir','directory','directory_path'];
+                                for (const k of pathKeys) {
+                                    if (args[k] && typeof args.path !== 'string') {
+                                        args.path = args[k];
+                                        break;
+                                    }
+                                }
+                                // Cleanup: remove alias keys to reduce confusion
+                                ['filename','file','file_path','filepath','target','folder_path','dir','directory','directory_path'].forEach(k => { if (k in args) delete args[k]; });
+
+                                // Basic sanity for path
+                                if (typeof args.path === 'string') {
+                                    args.path = args.path.trim();
+                                }
+                            }
+
                             // Single-use guard: ignore task_breakdown if the task already broke down once
                             if (name === 'task_breakdown') {
                                 // Minimal param sanity: skip if taskId missing to avoid "No parameters" noise
@@ -487,6 +505,16 @@ export const ChatService = {
                                 }
                             }
 
+                            // Guard: drop destructive calls with no usable parameters, add UI hint
+                            if ((name === 'delete_file' || name === 'delete_folder')) {
+                                const hasPath = args && typeof args.path === 'string' && args.path.length > 0;
+                                if (!hasPath) {
+                                    console.warn(`[ChatService] Skipping ${name}: missing required "path" parameter after normalization.`);
+                                    UI.appendMessage(chatMessages, `Skipped ${name}: missing required "path" parameter. Use { path: "<relative path>" }.`, 'ai-muted');
+                                    return null;
+                                }
+                            }
+
                             return { ...call, args };
                         })
                         .filter(Boolean); // remove skipped calls
@@ -506,8 +534,20 @@ export const ChatService = {
                         console.log(`Executing tool: ${call.name} sequentially...`);
                         UI.showThinkingIndicator(chatMessages, `Executing tool: ${call.name}...`);
                         const result = await ToolExecutor.execute(call, this.rootDirectoryHandle);
-                        // Record executed tool name for evidence tracking
-                        try { this.lastExecutedTools.push(call.name); } catch (e) {}
+
+                        // Record executed tool name for evidence tracking ONLY on success (no error in response)
+                        try {
+                            const resp = result && result.toolResponse && result.toolResponse.response ? result.toolResponse.response : null;
+                            const succeeded = resp && !resp.error;
+                            if (succeeded) {
+                                this.lastExecutedTools.push(call.name);
+                            } else {
+                                console.warn(`[ChatService] Tool "${call.name}" did not succeed; not counted as destructive evidence.`);
+                            }
+                        } catch (e) {
+                            console.warn('[ChatService] Evidence ledger update failed:', e?.message);
+                        }
+
                         toolResults.push({
                             id: call.id,
                             name: result.toolResponse.name,
