@@ -353,10 +353,15 @@ Return ONLY a valid JSON array of subtasks in this exact format - no markdown, n
 CRITICAL: Your response must start with [ and end with ]. Do not include any text before or after the JSON array.`;
 
         try {
-            // Send prompt without tools to avoid confusion
+            // Send prompt without tools to avoid confusion and enforce strict JSON-only response at the system level
             const response = await ChatService.sendPrompt(prompt, {
                 tools: [], // No tools needed for JSON response
-                history: ChatService.currentHistory || [] // Use live history
+                history: ChatService.currentHistory || [], // Use live history
+                customRules: `STRICT JSON MODE:
+- You MUST respond with ONLY a JSON array as specified by the user, starting with [ and ending with ].
+- Do NOT include any text, markdown, code fences, or explanations before or after the JSON.
+- Do NOT mention or attempt to use tools or task sessions. Tools are unavailable in this call.
+- If safety concerns or confirmations are needed, STILL return the best possible JSON breakdown strictly following the requested format.`
             });
             
             // Extract JSON from response with more robust parsing
@@ -424,7 +429,7 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                 throw new Error('No valid JSON array found in AI response');
             }
             
-            const aiSubtasks = jsonArray;
+            let aiSubtasks = jsonArray;
             
             // Validate and create actual subtasks
             const subtasks = [];
@@ -440,23 +445,136 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                 console.warn('[TaskManager] AI returned empty task array');
                 throw new Error('AI returned no subtasks');
             }
+
+                        // Adapt/normalize provider schemas if present (no 'title' fields)
+                        const hasAnyTitle = aiSubtasks.some(t => t && typeof t === 'object' && t.title && String(t.title).trim().length > 0);
+                        if (!hasAnyTitle) {
+                            const first = aiSubtasks[0] || {};
+                            
+                            // Helper to extract inner steps array from common containers
+                            const extractFromContainer = (container) => {
+                                if (!container || typeof container !== 'object') return null;
+                                const candidates = [
+                                    container.requested_actions,
+                                    container.requestedActions,
+                                    container.recommended_actions,
+                                    container.recommendedActions,
+                                    container.actions,
+                                    container.steps,
+                                    container.tasks,
+                                    container.items,
+                                    container.plan && container.plan.steps
+                                ].filter(arr => Array.isArray(arr) && arr.length > 0);
+                                return candidates.length > 0 ? candidates[0] : null;
+                            };
             
+                            let adapted = null;
+            
+                            // Case 1: Single wrapper object with inner arrays (e.g., requested_actions/steps/tasks/etc.)
+                            const inner = extractFromContainer(first);
+                            if (inner) {
+                                adapted = inner;
+                            } else if (aiSubtasks.length === 1) {
+                                // Sometimes the array has a single wrapper object
+                                const altInner = extractFromContainer(aiSubtasks[0]);
+                                if (altInner) adapted = altInner;
+                            }
+            
+                            // Case 2: Array of strings
+                            if (!adapted && aiSubtasks.every(t => typeof t === 'string')) {
+                                adapted = aiSubtasks;
+                            }
+            
+                            // Case 3: Array of objects but with alternative title fields (action/name/step/summary/goal/objective)
+                            if (!adapted && aiSubtasks.every(t => t && typeof t === 'object')) {
+                                const usesAltKeys = aiSubtasks.every(t => (t.action || t.name || t.step || t.summary || t.goal || t.objective));
+                                if (usesAltKeys) {
+                                    adapted = aiSubtasks;
+                                }
+                            }
+            
+                            if (adapted) {
+                                aiSubtasks = adapted.map((entry, i) => {
+                                    if (typeof entry === 'string') {
+                                        return {
+                                            title: entry.trim(),
+                                            description: first.reason || first.description || 'Converted from provider schema.',
+                                            priority: i === 0 ? 'high' : 'medium',
+                                            estimatedTime: 15
+                                        };
+                                    }
+                                    if (entry && typeof entry === 'object') {
+                                        const titleCandidate = entry.title || entry.action || entry.name || entry.step || entry.summary || entry.goal || entry.objective;
+                                        const descCandidate = entry.description || entry.details || entry.reason || entry.explanation || first.reason || 'Converted from provider schema.';
+                                        const est = typeof entry.estimatedTime === 'number' ? entry.estimatedTime : 15;
+                                        return {
+                                            title: String(titleCandidate || `Step ${i + 1}`).trim(),
+                                            description: String(descCandidate),
+                                            priority: i === 0 ? 'high' : 'medium',
+                                            estimatedTime: est
+                                        };
+                                    }
+                                    return {
+                                        title: `Step ${i + 1}`,
+                                        description: 'Converted from provider schema.',
+                                        priority: i === 0 ? 'high' : 'medium',
+                                        estimatedTime: 15
+                                    };
+                                });
+                                console.warn('[TaskManager] Adapted provider JSON to actionable subtasks via schema normalization.');
+                            } else {
+                                const keys = Array.isArray(aiSubtasks) && aiSubtasks[0] && typeof aiSubtasks[0] === 'object'
+                                    ? Object.keys(aiSubtasks[0]).join(', ')
+                                    : typeof aiSubtasks[0];
+                                console.warn('[TaskManager] Could not adapt provider JSON. First item keys/type:', keys);
+                                // Escalate to fallback breakdown at a higher level
+                                throw new Error('AI returned subtasks without titles and no adaptable schema (requested_actions/actions/steps/tasks/items).');
+                            }
+                        }
+            
+            // Loop-time sanitizer: synthesize titles from alternate keys and skip pure metadata objects
+            const altTitle = (obj) => {
+                if (!obj || typeof obj !== 'object') return null;
+                return obj.title || obj.action || obj.name || obj.step || obj.summary || obj.goal || obj.objective ||
+                       obj.description || obj.details || obj.reason || obj.explanation || null;
+            };
+            const isMetadataOnly = (obj) => {
+                if (!obj || typeof obj !== 'object') return false;
+                const metaKeys = ['overall_risk','overallRisk','safety_note','safetyNote','risk_level','riskLevel','notes','disclaimer'];
+                const hasMeta = metaKeys.some(k => k in obj);
+                const hasActionable = ['title','action','name','step','summary','goal','objective','description','details','reason','explanation']
+                    .some(k => obj[k] && String(obj[k]).trim().length > 0);
+                return hasMeta && !hasActionable;
+            };
+            let warnedMetaSkip = false;
+
             for (const [index, aiSubtask] of aiSubtasks.entries()) {
-                // Validate required fields
+                // Synthesize title from alternate keys if missing
                 if (!aiSubtask.title) {
-                    console.error(`[TaskManager] Subtask ${index} missing title:`, aiSubtask);
-                    continue; // Skip invalid tasks
+                    const candidate = altTitle(aiSubtask);
+                    if (candidate) {
+                        aiSubtask.title = String(candidate).trim();
+                    } else if (isMetadataOnly(aiSubtask)) {
+                        if (!warnedMetaSkip) {
+                            console.warn('[TaskManager] Skipping non-actionable safety/metadata object in AI breakdown.');
+                            warnedMetaSkip = true;
+                        }
+                        continue; // quietly ignore metadata-only entries
+                    } else {
+                        console.error(`[TaskManager] Subtask ${index} missing title:`, aiSubtask);
+                        continue; // Skip invalid tasks
+                    }
                 }
                 
                 try {
                     const subtask = await this.createTask({
                         title: aiSubtask.title,
-                        description: aiSubtask.description || '',
+                        description: aiSubtask.description || aiSubtask.details || aiSubtask.explanation || aiSubtask.reason || '',
                         priority: aiSubtask.priority || 'medium',
                         parentId: mainTask.id,
                         listId: mainTask.listId,
                         dependencies: prevTaskId ? [prevTaskId] : [],
-                        estimatedTime: aiSubtask.estimatedTime || 30,
+                        estimatedTime: (typeof aiSubtask.estimatedTime === 'number' && aiSubtask.estimatedTime > 0) ? aiSubtask.estimatedTime : 30,
                         tags: ['ai-generated', 'subtask', 'ai-driven'],
                         context: {
                             ...mainTask.context,

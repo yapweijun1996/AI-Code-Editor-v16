@@ -109,9 +109,9 @@ export class OpenAIService extends BaseLLMService {
     _prepareMessages(history, customRules, options = {}) {
         const mode = document.getElementById('agent-mode-selector')?.value || 'code';
         const systemPrompt = this._getSystemPrompt(mode, customRules, options);
-        const messages = [{ role: 'system', content: systemPrompt }];
+        const rawMessages = [{ role: 'system', content: systemPrompt }];
 
-        // Track tool calls to ensure proper pairing
+        // Track tool calls to ensure proper pairing while building rawMessages
         const pendingToolCalls = new Map();
 
         for (const turn of history) {
@@ -122,7 +122,7 @@ export class OpenAIService extends BaseLLMService {
                     toolResponses.forEach(responsePart => {
                         const toolCallId = responsePart.functionResponse.id;
                         if (pendingToolCalls.has(toolCallId)) {
-                            messages.push({
+                            rawMessages.push({
                                 role: 'tool',
                                 tool_call_id: toolCallId,
                                 name: responsePart.functionResponse.name,
@@ -133,8 +133,8 @@ export class OpenAIService extends BaseLLMService {
                     });
                 } else {
                     const userContent = turn.parts.map(p => p.text).join('\n');
-                    if (userContent.trim()) {
-                        messages.push({ role: 'user', content: userContent });
+                    if (userContent && userContent.trim()) {
+                        rawMessages.push({ role: 'user', content: userContent });
                     }
                 }
             } else if (turn.role === 'model') {
@@ -150,9 +150,9 @@ export class OpenAIService extends BaseLLMService {
                     }));
 
                 if (toolCalls.length > 0) {
-                    messages.push({
+                    rawMessages.push({
                         role: 'assistant',
-                        content: null, // As per OpenAI's spec, content is null when tool_calls is present
+                        content: null, // OpenAI spec: content null when tool_calls present
                         tool_calls: toolCalls
                     });
                     // Track these tool calls for response matching
@@ -161,40 +161,69 @@ export class OpenAIService extends BaseLLMService {
                     });
                 } else {
                     const modelContent = turn.parts.filter(p => p.text).map(p => p.text).join('\n');
-                    if (modelContent.trim()) {
-                        messages.push({ role: 'assistant', content: modelContent });
+                    if (modelContent && modelContent.trim()) {
+                        rawMessages.push({ role: 'assistant', content: modelContent });
                     }
                 }
             }
         }
 
-        // Clean up any orphaned tool calls by removing assistant messages with no responses
-        const cleanedMessages = [];
-        for (let i = 0; i < messages.length; i++) {
-            const msg = messages[i];
-            if (msg.role === 'assistant' && msg.tool_calls) {
-                // Check if the next messages contain responses to these tool calls
-                const toolCallIds = msg.tool_calls.map(tc => tc.id);
-                let hasResponses = false;
-                for (let j = i + 1; j < messages.length; j++) {
-                    if (messages[j].role === 'tool' && toolCallIds.includes(messages[j].tool_call_id)) {
-                        hasResponses = true;
-                        break;
-                    }
-                    if (messages[j].role === 'assistant' || messages[j].role === 'user') {
-                        break; // Stop looking once we hit another turn
-                    }
-                }
-                if (hasResponses) {
-                    cleanedMessages.push(msg);
-                }
-                // If no responses, skip this assistant message with tool calls
-            } else {
-                cleanedMessages.push(msg);
+        // OpenAI strict requirement:
+        // Every assistant message with tool_calls must be followed by tool messages responding to each tool_call_id
+        // BEFORE any subsequent assistant message. We sanitize the outbound messages by trimming any
+        // trailing unresolved assistant tool_calls and anything after them.
+        const sanitized = [];
+        const openToolCallIds = new Set();
+        let firstUnresolvedAssistantIndex = -1;
+
+        for (let i = 0; i < rawMessages.length; i++) {
+            const msg = rawMessages[i];
+
+            // If we encounter a normal assistant message while there are unresolved tool calls,
+            // we must stop including further messages (OpenAI would reject this state).
+            if (msg.role === 'assistant' && !msg.tool_calls && openToolCallIds.size > 0) {
+                // Do not include this assistant message or anything after it
+                break;
             }
+
+            // Process assistant tool_calls
+            if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                // Record the point where unresolved tool_calls begin (if not already recorded)
+                if (openToolCallIds.size === 0 && firstUnresolvedAssistantIndex === -1) {
+                    firstUnresolvedAssistantIndex = sanitized.length; // index in sanitized after push below
+                }
+                // Tentatively include the assistant tool_calls message
+                sanitized.push(msg);
+                // Track all tool_call_ids as open
+                for (const tc of msg.tool_calls) {
+                    if (tc && tc.id) openToolCallIds.add(tc.id);
+                }
+                continue;
+            }
+
+            // Process tool responses
+            if (msg.role === 'tool' && msg.tool_call_id) {
+                if (openToolCallIds.has(msg.tool_call_id)) {
+                    openToolCallIds.delete(msg.tool_call_id);
+                }
+                sanitized.push(msg);
+                continue;
+            }
+
+            // All other messages (system/user/assistant text)
+            sanitized.push(msg);
         }
 
-        return cleanedMessages;
+        // If we still have unresolved tool calls at the end, we must drop the trailing
+        // unresolved assistant tool_calls message and anything after it.
+        if (openToolCallIds.size > 0 && firstUnresolvedAssistantIndex !== -1) {
+            // Keep everything before the assistant tool_calls that opened unresolved set
+            const trimmed = sanitized.slice(0, firstUnresolvedAssistantIndex);
+            console.warn('[OpenAI Service] Sanitized outbound messages: trimmed trailing unresolved assistant tool_calls to satisfy OpenAI requirements.');
+            return trimmed;
+        }
+
+        return sanitized;
     }
 
     _getSystemPrompt(mode, customRules, options = {}) {
@@ -260,20 +289,13 @@ export class OpenAIService extends BaseLLMService {
         } else {
             baseCodePrompt += `
 
-**6. TASK MANAGEMENT & PRODUCTIVITY TOOLS - MANDATORY USAGE**
-- **IMMEDIATE ACTION REQUIRED:** Before starting ANY multi-step task, you MUST call \`start_task_session\` first. This is NOT optional.
-- **AI Task Management System - USE FIRST:**
-  - ANY request involving analysis, optimization, review, or improvement = Call \`start_task_session\` immediately
-  - Example: User says "analyze the code" → FIRST tool call must be \`start_task_session\` with goal "analyze codebase structure and quality"
-  - After \`start_task_session\`, use \`start_next_task\` to begin systematic work
-  - Use \`complete_current_task\` when finishing each subtask
-  - Use \`display_task_progress\` regularly to keep user informed
-- **Personal Todo System:** Help users manage their tasks:
-  - Use \`todo_create\` to capture user requirements as actionable todos
-  - Use \`todo_list\` to show existing todos
-  - Tell users they can access todo list anytime with Ctrl+T
-
-**MANDATORY RULE: If a user request involves more than reading a single file, you MUST start with \`start_task_session\`. NO EXCEPTIONS!**`;
+**6. TASK MANAGEMENT & PRODUCTIVITY TOOLS - CONDITIONAL USAGE**
+- Only use task management tools when the controller indicates a complex multi-step TASK.
+- If and only if a task session is needed (as implied by system/user history), then:
+  - First call \`start_task_session\` (if no session exists), then immediately perform \`task_breakdown\`.
+  - Use task update/progress tools during multi-step execution.
+- For DIRECT, SIMPLE_DIRECT, GREETING, or TOOL-classified interactions, DO NOT use task management tools.
+- Personal Todo System remains available when explicitly requested (e.g., user asks to create/list todos).`;
         }
 
         baseCodePrompt += `

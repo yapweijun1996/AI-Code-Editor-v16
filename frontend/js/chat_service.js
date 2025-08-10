@@ -264,6 +264,7 @@ export const ChatService = {
             totalRequestTokens = encode(historyText).length;
         }
         
+        let emptyRetryCount = 0;
         while (continueLoop && !this.isCancelled) {
             try {
                 UI.showThinkingIndicator(chatMessages, 'AI is thinking...');
@@ -326,6 +327,18 @@ export const ChatService = {
                 console.log(`[Token Usage] Final totals - Req: ${totalRequestTokens}, Res: ${totalResponseTokens}`);
                 UI.updateTokenDisplay(totalRequestTokens, totalResponseTokens);
                 
+                // Provider-agnostic empty-turn retry and protection
+                if (!modelResponseText && functionCalls.length === 0) {
+                    if (emptyRetryCount < 1) {
+                        emptyRetryCount++;
+                        console.warn('[ChatService] Empty model turn detected. Retrying once...');
+                        UI.appendMessage(chatMessages, 'No response received, retrying...', 'ai-muted');
+                        continue;
+                    } else {
+                        console.warn('[ChatService] Empty model turn after retry. Exiting without marking completion.');
+                        break;
+                    }
+                }
 
                 const modelResponseParts = [];
                 if (modelResponseText) modelResponseParts.push({ text: modelResponseText });
@@ -338,9 +351,41 @@ export const ChatService = {
                 }
 
                 if (functionCalls.length > 0) {
+                    // Normalize tool calls to prevent schema errors (e.g., missing 'updates' for task_update)
+                    const normalizedCalls = functionCalls.map((call) => {
+                        const name = call.name;
+                        const rawArgs = call.args || {};
+                        const args = { ...rawArgs };
+
+                        // Common key normalization: snake_case -> camelCase
+                        if ('task_id' in args && !('taskId' in args)) args.taskId = args.task_id;
+                        if ('list_id' in args && !('listId' in args)) args.listId = args.list_id;
+                        if ('old_path' in args && !('old_path' in args)) args.old_path = args.old_path; // kept same
+                        if ('new_path' in args && !('new_path' in args)) args.new_path = args.new_path; // kept same
+
+                        // Specific normalization for task_update: ensure required shape
+                        if (name === 'task_update') {
+                            if (!args.taskId && typeof args.taskId !== 'string' && typeof args.task_id === 'string') {
+                                args.taskId = args.task_id;
+                            }
+                            if (!args.updates || typeof args.updates !== 'object') {
+                                // Synthesize a minimal updates object to satisfy tool contract
+                                // Prefer any top-level status if present; otherwise create empty update.
+                                const synthesized = {};
+                                if (typeof args.status === 'string') {
+                                    synthesized.status = args.status;
+                                }
+                                args.updates = synthesized;
+                                console.warn('[ChatService] Normalized task_update call: injected missing "updates" object.');
+                            }
+                        }
+
+                        return { ...call, args };
+                    });
+
                     // Execute all tools sequentially for all providers
                     const toolResults = [];
-                    for (const call of functionCalls) {
+                    for (const call of normalizedCalls) {
                         if (this.isCancelled) return;
                         console.log(`Executing tool: ${call.name} sequentially...`);
                         UI.showThinkingIndicator(chatMessages, `Executing tool: ${call.name}...`);
@@ -406,7 +451,8 @@ export const ChatService = {
             }];
 
             let fullResponse = '';
-            const streamGenerator = this.llmService.sendMessageStream(messageHistory, tools, customRules);
+            // Forward options so providers can adapt system prompt/behavior (e.g., directAnalysis)
+            const streamGenerator = this.llmService.sendMessageStream(messageHistory, tools, customRules, options);
             
             for await (const chunk of streamGenerator) {
                 if (chunk.text) {
@@ -447,13 +493,24 @@ export const ChatService = {
             const classificationResult = await this._classifyMessageIntent(userPrompt, this._getRecentContext());
             
             // Robust parsing for the intent
-            const match = classificationResult.match(/(DIRECT|TASK|TOOL)/);
+            const match = classificationResult.match(/(GREETING|SIMPLE_DIRECT|DIRECT|TASK|TOOL)/);
             const intent = match ? match[0] : 'DIRECT'; // Default to DIRECT for safety
 
             console.log(`AI classified intent as: ${intent}. Raw response: "${classificationResult}"`);
 
             // 3. Route to the appropriate handler based on AI's decision
             switch (intent) {
+                case 'GREETING':
+                case 'SIMPLE_DIRECT':
+                    // Lightweight direct reply: single turn, no tools
+                    this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
+                    await this._performApiCall(this.currentHistory, chatMessages, {
+                        singleTurn: true,
+                        useTools: false,
+                        directAnalysis: true
+                    });
+                    await DbManager.saveChatHistory(this.currentHistory);
+                    break;
                 case 'TASK':
                     await this._handleTaskCreation(userPrompt, chatMessages);
                     break;
@@ -485,32 +542,35 @@ export const ChatService = {
         const classificationPrompt = `
 Analyze the user's message and classify its primary intent into ONE of the following categories.
 
-**Conversation Context:**
+Conversation Context:
 ${conversationContext}
 
-**User Message:** "${userPrompt}"
+User Message: "${userPrompt}"
 
 ---
-**Classification Categories & Rules:**
+Classification Categories & Rules:
 
-1.  **DIRECT**: The user wants the AI to analyze, explain, review, or answer something. The primary action is AI thought, which may require using tools to gather information first.
-    *   **Examples**: "review file.js", "explain this code", "what does this function do?", "how does this work?", "fix this error"
-    *   **Keywords**: review, explain, what, how, why, fix, analyze
+1) GREETING: Short greetings, thanks, farewells, or small talk without actionable intent.
+   - Examples: "hi", "hello", "你好", "在吗", "thanks", "bye", "hey there"
+   - Heuristics: <= 3 words, no verbs implying work, no file/tool mentions.
 
-2.  **TOOL**: The user wants to directly execute a specific tool and see the raw output. The primary action is running a tool, not AI analysis.
-    *   **Examples**: "read file.js", "list all files in src/", "search for 'API_KEY'", "get_project_structure"
-    *   **Keywords**: read, list, search, get, run tool
+2) SIMPLE_DIRECT: A simple Q&A or self-description request that can be answered directly without tools or context.
+   - Examples: "who are you?", "what time is it?", "what is your capability?"
 
-3.  **TASK**: The user wants to perform a complex, multi-step operation that requires planning and execution of several actions.
-    *   **Examples**: "create a login system", "refactor the database module", "implement user authentication", "build a new component"
-    *   **Keywords**: create, build, implement, refactor, design, develop, system, feature
+3) DIRECT: The user wants analysis/explanation/answer that may require at most 1–2 tool calls (read/search) but does NOT require multi-step planning.
+   - Examples: "review file.js", "explain this code", "what does this function do?", "fix this error in file x"
+
+4) TOOL: The user explicitly asks to run a specific tool and show raw output.
+   - Examples: "read file.js", "list files in src/", "search for 'API_KEY'", "get_project_structure"
+
+5) TASK: Complex, multi-step request that likely requires planning and multiple actions across files.
+   - Examples: "create a login system", "refactor the database module", "implement authentication", "delete all files under src"
 
 ---
-**Your Response:**
+Your Response:
 
-Provide the classification and a brief reason.
-
-Response format: DIRECT|TASK|TOOL
+Return ONLY:
+Classification: GREETING|SIMPLE_DIRECT|DIRECT|TOOL|TASK
 Reason: [brief explanation]`;
 
         // Use sendPrompt for a direct, non-chatty response
@@ -669,7 +729,13 @@ Reason: [brief explanation]`;
         this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
         this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
 
-        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: true }); // Force breakdown
+        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: false }); // Allow multi-turn kickoff
+
+        // Fallback: if no subtasks were created, programmatically break down the goal
+        if (!mainTask.subtasks || mainTask.subtasks.length === 0) {
+            UI.appendMessage(chatMessages, 'No subtasks detected after kickoff. Performing deterministic breakdown...', 'ai-muted');
+            await taskManager.breakdownGoal(mainTask);
+        }
 
         let nextTask = taskManager.getNextTask();
         let executionAttempts = 0;
@@ -742,7 +808,11 @@ Execute this task step by step. When completed, call the task_update tool to mar
             const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
             const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
             const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
-            if (failedSubtasks.length > 0) {
+
+            if (allSubtasks.length === 0 || completedSubtasks.length === 0) {
+                await taskManager.updateTask(mainTask.id, { status: 'failed', results: { reason: 'No substasks executed or completed', completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
+                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" did not complete: ${completedSubtasks.length}/${allSubtasks.length} subtasks completed.`, 'ai');
+            } else if (failedSubtasks.length > 0) {
                 await taskManager.updateTask(mainTask.id, { status: 'failed', results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
                 UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');
             } else {
