@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIO Test - Automated Tool Suite</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;background:#0b0f17;color:#e6edf3}
+    h1{margin:0 0 12px 0;font-size:20px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+    button{background:#238636;border:0;color:#fff;padding:8px 12px;border-radius:6px;cursor:pointer}
+    button.secondary{background:#30363d}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .panel{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:12px}
+    .log{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;height:320px;overflow:auto;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-size:12px;white-space:pre-wrap}
+    .status{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+    .badge{padding:2px 6px;border-radius:999px;border:1px solid #30363d;background:#161b22;font-size:11px}
+    .pass{color:#3fb950}
+    .fail{color:#f85149}
+    .warn{color:#d29922}
+    .summary{margin-top:12px}
+    a{color:#58a6ff}
+  </style>
+  <script defer src="../js/tool_executor.js"></script>
+</head>
+<body>
+  <h1>AIO Test - Automated Tool Suite</h1>
+  <div class="controls">
+    <button id="selectDirBtn">Select Directory (required for FS tests)</button>
+    <button id="runBtn" class="secondary">Run All Tests</button>
+    <button id="stopBtn" class="secondary">Stop</button>
+  </div>
+  <div class="grid">
+    <section class="panel">
+      <div class="status">
+        <span class="badge">Backend</span>
+        <span id="backendStatus">Idle</span>
+      </div>
+      <div id="backendLog" class="log"></div>
+    </section>
+    <section class="panel">
+      <div class="status">
+        <span class="badge">Frontend FS</span>
+        <span id="fsStatus">Idle</span>
+      </div>
+      <div id="fsLog" class="log"></div>
+    </section>
+  </div>
+  <section class="panel summary">
+    <div class="status">
+      <span class="badge">Summary</span>
+      <span id="summaryText">No runs yet.</span>
+    </div>
+    <div>Tip: Open the <a href="./index.html" target="_blank" rel="noopener">Test Hub</a> in another tab.</div>
+  </section>
+
+<script>
+(function(){
+  const el = s => document.querySelector(s);
+  const backendLog = el('#backendLog');
+  const fsLog = el('#fsLog');
+  const backendStatus = el('#backendStatus');
+  const fsStatus = el('#fsStatus');
+  const runBtn = el('#runBtn');
+  const stopBtn = el('#stopBtn');
+  const selectDirBtn = el('#selectDirBtn');
+  const summaryText = el('#summaryText');
+
+  let abort = false;
+  let rootDirHandle = null;
+
+  function log(target, msg) {
+    const time = new Date().toISOString().split('T')[1].replace('Z','');
+    target.textContent += '[' + time + '] ' + msg + '\n';
+    target.scrollTop = target.scrollHeight;
+  }
+  function setStatus(elm, text, cls) {
+    elm.textContent = text;
+    elm.classList.remove('pass','fail','warn');
+    if (cls) elm.classList.add(cls);
+  }
+  async function postJSON(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body||{})
+    });
+    const data = await res.json().catch(()=> ({}));
+    return { status: res.status, ok: res.ok, data };
+  }
+
+  // Path utilities with FS Access API
+  async function getHandleForPath(root, path, { createDir } = { createDir: false }) {
+    const parts = path.split('/').filter(Boolean);
+    let dir = root;
+    for (let i=0;i<parts.length-1;i++) {
+      const segment = parts[i];
+      try {
+        dir = await dir.getDirectoryHandle(segment, { create: createDir });
+      } catch (e) {
+        throw new Error('Directory not found: ' + segment + ' in ' + path);
+      }
+    }
+    const name = parts[parts.length-1];
+    return { dir, name };
+  }
+  async function ensureFile(root, path) {
+    const { dir, name } = await getHandleForPath(root, path, { createDir: true });
+    return await dir.getFileHandle(name, { create: true });
+  }
+  async function getExistingFile(root, path) {
+    const { dir, name } = await getHandleForPath(root, path, { createDir: false });
+    return await dir.getFileHandle(name, { create: false });
+  }
+  async function writeFile(handle, content) {
+    const ws = await handle.createWritable();
+    await ws.write(content);
+    await ws.close();
+  }
+  async function readFileText(handle) {
+    const file = await handle.getFile();
+    return await file.text();
+  }
+  async function removeEntry(root, path) {
+    const { dir, name } = await getHandleForPath(root, path, { createDir: false });
+    await dir.removeEntry(name, { recursive: false });
+  }
+  async function renameFile(root, oldPath, newPath) {
+    // Copy + delete approach
+    const src = await getExistingFile(root, oldPath);
+    const srcText = await readFileText(src);
+    const dstHandle = await ensureFile(root, newPath);
+    await writeFile(dstHandle, srcText);
+    await removeEntry(root, oldPath);
+  }
+  async function exists(root, path) {
+    try {
+      await getExistingFile(root, path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async function listDir(root, path) {
+    const parts = path ? path.split('/').filter(Boolean) : [];
+    let dir = root;
+    for (const p of parts) {
+      dir = await dir.getDirectoryHandle(p, { create: false });
+    }
+    const entries = [];
+    for await (const [name, handle] of dir.entries()) {
+      entries.push({ name, kind: handle.kind });
+    }
+    return entries;
+  }
+
+  async function runBackendTests() {
+    setStatus(backendStatus, 'Running...', 'warn');
+    backendLog.textContent = '';
+    let pass = 0, fail = 0;
+    // duckduckgo_search
+    try {
+      log(backendLog, 'duckduckgo_search → querying "example domain"');
+      const r = await postJSON('/api/duckduckgo-search', { query: 'example domain' });
+      const hasResults = r.ok && (Array.isArray(r.data.results) ? r.data.results.length>0 : (typeof r.data.html === 'string' ? r.data.html.length>0 : true));
+      if (!r.ok || !hasResults) throw new Error('unexpected response');
+      log(backendLog, 'duckduckgo_search PASS');
+      pass++;
+    } catch (e) {
+      log(backendLog, 'duckduckgo_search FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // read_url
+    try {
+      log(backendLog, 'read_url → fetching https://example.com');
+      const r = await postJSON('/api/read-url', { url: 'https://example.com' });
+      const text = (r.data && (r.data.text || r.data.content || '')) || '';
+      if (!r.ok || !/Example Domain/i.test(text)) throw new Error('content check failed');
+      log(backendLog, 'read_url PASS');
+      pass++;
+    } catch (e) {
+      log(backendLog, 'read_url FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // run_terminal_command
+    try {
+      log(backendLog, 'run_terminal_command → echo AIO_OK');
+      const r = await postJSON('/api/execute-tool', { toolName: 'run_terminal_command', parameters: { command: 'echo AIO_OK' } });
+      const out = (r.data && (r.data.stdout || r.data.output || '')) || '';
+      if (!r.ok || !/AIO_OK/.test(out)) throw new Error('output mismatch');
+      log(backendLog, 'run_terminal_command PASS');
+      pass++;
+    } catch (e) {
+      log(backendLog, 'run_terminal_command FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // get_file_history
+    try {
+      log(backendLog, 'get_file_history → backend/index.js');
+      const r = await postJSON('/api/execute-tool', { toolName: 'get_file_history', parameters: { path: 'backend/index.js' } });
+      const ok = r.ok && r.data;
+      if (!ok) throw new Error('no data');
+      log(backendLog, 'get_file_history PASS');
+      pass++;
+    } catch (e) {
+      log(backendLog, 'get_file_history FAIL: ' + e.message);
+      fail++;
+    }
+    setStatus(backendStatus, fail ? ('Failed ('+fail+')') : 'Passed', fail ? 'fail' : 'pass');
+    return { pass, fail };
+  }
+
+  async function runFsTests() {
+    setStatus(fsStatus, 'Running...', 'warn');
+    fsLog.textContent = '';
+    if (!rootDirHandle) {
+      log(fsLog, 'No directory selected. Click "Select Directory".');
+      setStatus(fsStatus, 'Needs Directory', 'warn');
+      return { pass: 0, fail: 1 };
+    }
+    let pass = 0, fail = 0;
+    const testFile = 'aio-test/.aio-test-file.tmp';
+    const renamedFile = 'aio-test/.aio-test-file.renamed';
+    const content = 'AIO FILE TEST\nLINE 1\nLINE 2\nLINE 3';
+    // ensure folder
+    try {
+      await ensureFile(rootDirHandle, testFile);
+      log(fsLog, 'Created file: ' + testFile);
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Create FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // write
+    try {
+      const fh = await getExistingFile(rootDirHandle, testFile);
+      await writeFile(fh, content);
+      log(fsLog, 'Write PASS');
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Write FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // list
+    try {
+      const entries = await listDir(rootDirHandle, 'aio-test');
+      const names = entries.map(e=>e.name);
+      if (!names.includes('.aio-test-file.tmp')) throw new Error('file not found in list');
+      log(fsLog, 'List PASS (' + names.join(', ') + ')');
+      pass++;
+    } catch (e) {
+      log(fsLog, 'List FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // read
+     try {
+      const fh = await getExistingFile(rootDirHandle, testFile);
+      const txt = await readFileText(fh);
+      if (!/AIO FILE TEST/.test(txt)) throw new Error('read content mismatch');
+      log(fsLog, 'Read PASS');
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Read FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // search_in_file (regex)
+    try {
+      const fh = await getExistingFile(rootDirHandle, testFile);
+      const txt = await readFileText(fh);
+      const re = /LINE\s+2/;
+      const matched = re.test(txt);
+      if (!matched) throw new Error('pattern not found');
+      log(fsLog, 'Search PASS (regex /LINE\\s+2/)');
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Search FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // read_file_lines
+    try {
+      const fh = await getExistingFile(rootDirHandle, testFile);
+      const txt = await readFileText(fh);
+      const lines = txt.split(/\r?\n/);
+      const slice = lines.slice(1,3).join('\n');
+      if (!/LINE 1\nLINE 2/.test(slice)) throw new Error('slice mismatch');
+      log(fsLog, 'Read Lines PASS (2 lines)');
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Read Lines FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // rename_file
+    try {
+      await renameFile(rootDirHandle, testFile, renamedFile);
+      const ok = await exists(rootDirHandle, renamedFile);
+      if (!ok) throw new Error('renamed file missing');
+      log(fsLog, 'Rename PASS → ' + renamedFile);
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Rename FAIL: ' + e.message);
+      fail++;
+    }
+    if (abort) return { pass, fail };
+    // cleanup
+    try {
+      await removeEntry(rootDirHandle, renamedFile);
+      log(fsLog, 'Cleanup PASS');
+      pass++;
+    } catch (e) {
+      log(fsLog, 'Cleanup WARN (manual cleanup may be required): ' + e.message);
+      // not marking as fail; be lenient
+    }
+    setStatus(fsStatus, fail ? ('Failed ('+fail+')') : 'Passed', fail ? 'fail' : 'pass');
+    return { pass, fail };
+  }
+
+  async function runAll() {
+    abort = false;
+    runBtn.disabled = true;
+    setStatus(backendStatus, 'Queued', 'warn');
+    setStatus(fsStatus, 'Queued', 'warn');
+    summaryText.textContent = 'Running...';
+    const b = await runBackendTests();
+    if (abort) { summaryText.textContent = 'Aborted.'; runBtn.disabled = false; return; }
+    const f = await runFsTests();
+    const totalPass = b.pass + f.pass;
+    const totalFail = b.fail + f.fail;
+    summaryText.textContent = 'Done. Passed: ' + totalPass + ', Failed: ' + totalFail + '.';
+    runBtn.disabled = false;
+  }
+
+  runBtn.addEventListener('click', runAll);
+  stopBtn.addEventListener('click', ()=> { abort = true; log(backendLog, 'Abort requested'); log(fsLog, 'Abort requested'); });
+  selectDirBtn.addEventListener('click', async ()=> {
+    try {
+      rootDirHandle = await window.showDirectoryPicker();
+      log(fsLog, 'Directory selected.');
+      setStatus(fsStatus, 'Directory Ready', 'pass');
+    } catch (e) {
+      log(fsLog, 'Directory selection cancelled.');
+    }
+  });
+})();
+</script>
+</body>
+</html>

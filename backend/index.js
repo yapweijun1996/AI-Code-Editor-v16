@@ -199,15 +199,17 @@ app.post('/api/execute-tool', async (req, res) => {
 
   let command;
   if (toolName === 'get_file_history') {
-    if (!parameters.filename) {
-        return res.status(400).json({ status: 'Error', message: "A 'filename' parameter is required for get_file_history." });
+    // Accept both 'filename' and 'path' for flexibility
+    const fileParam = (parameters && (parameters.filename || parameters.path)) || null;
+    if (!fileParam) {
+      return res.status(400).json({ status: 'Error', message: "A 'filename' or 'path' parameter is required for get_file_history." });
     }
     // Sanitize filename to prevent command injection
-    const sanitizedFilename = JSON.stringify(parameters.filename);
+    const sanitizedFilename = JSON.stringify(fileParam);
     command = `git log --pretty=format:'%H|%an|%ad|%s' -- ${sanitizedFilename}`;
   } else { // run_terminal_command
     if (!parameters.command) {
-        return res.status(400).json({ status: 'Error', message: "A 'command' parameter is required for run_terminal_command." });
+      return res.status(400).json({ status: 'Error', message: "A 'command' parameter is required for run_terminal_command." });
     }
     command = parameters.command;
   }
