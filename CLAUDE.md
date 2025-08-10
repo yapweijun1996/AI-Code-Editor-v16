@@ -154,3 +154,53 @@ frontend/
 - **Tool System**: 30+ tools for AI agent, including Senior Engineer AI capabilities
 - **Multi-Provider**: Supports Gemini (with API key rotation), OpenAI, and Ollama
 - **Persistence**: IndexedDB stores settings, chat history, checkpoints, and file handles
+
+## Common Issues & Solutions
+
+### JavaScript Temporal Dead Zone Errors
+**Problem**: `ReferenceError: Cannot access 'variableName' before initialization`
+**Location**: Often in `frontend/js/llm/gemini_service.js` and similar files
+**Solution**: Declare variables with `let`/`const` at the top of their scope before any usage
+
+### AI Tool Parameter Errors
+**Problem**: `Error executing tool 'delete_file': The 'filename' parameter is required`
+**Location**: AI calls tools with wrong parameter names (e.g., `path` instead of `filename`)
+**Solution**: Enhanced parameter normalization in `chat_service.js` automatically maps common aliases
+**Debug**: Check browser console for parameter mapping logs with `[ChatService]` prefix
+
+### File Path Issues
+**Problem**: File operations fail with incorrect paths
+**Solution**: Never include the top-level project folder name in paths - the file system is already rooted in the project directory
+
+### AI Provider API Issues
+**Problem**: API calls failing or inconsistent responses
+**Solution**: Check API key rotation system for Gemini, verify provider configuration in settings
+
+## Development Debugging
+
+### Client-Side Debugging
+- Open browser DevTools (F12) - all AI logic runs in the browser
+- Check Console tab for JavaScript errors and tool execution logs
+- Network tab shows API calls to LLM providers
+- Application tab shows IndexedDB storage for persistence
+
+### Performance Analysis
+- Built-in performance profiler in `frontend/js/core/performance_profiler.js`
+- Tool execution metrics automatically tracked
+- Use browser Performance tab for detailed profiling
+
+### Backend Debugging
+- Backend logs via `pm2 logs ai-editor` (or `pm2 logs ai-editor-backend`)
+- Minimal backend only handles URL fetching and code indexing
+- Most issues are client-side - check browser console first
+
+## Tool System Architecture
+
+The AI has access to 40+ specialized tools organized in categories:
+- **Senior Engineer AI Tools**: Symbol resolution, data flow analysis, systematic debugging
+- **File Operations**: Create, read, edit, delete files with various precision levels
+- **Search & Analysis**: Code search, semantic search, web research
+- **Editor Integration**: Direct integration with Monaco Editor
+- **Task Management**: Project task tracking and session management
+
+Tools are executed client-side and results are automatically reflected in the UI (file opening, content updates).

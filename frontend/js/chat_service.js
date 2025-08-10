@@ -28,6 +28,9 @@ export const ChatService = {
     lastPayloadHash: null,
     duplicatePayloadCount: 0,
 
+    // In-memory session totals for live badge updates
+    sessionTotals: { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+
     // Per-execution tool ledger and current task binding
     lastExecutedTools: [],
     currentExecutingTaskId: null,
@@ -263,20 +266,58 @@ export const ChatService = {
         return `Status Digest — Parent "${mainTask.title}" [${mainTask.status}] • Subtasks: total=${total}, completed=${completed}, failed=${failed}, pending=${pending}, in_progress=${inProgress}`;
     },
 
-    // Compute a simple payload hash based on provider, directAnalysis flag, tools names, and history roles/parts
+    // Compute a payload hash that captures intent to suppress redundant requests.
+    // Includes provider, directAnalysis flag, tools names, history role/part kinds,
+    // last functionCalls summary (names + sorted args), and executed tools.
     _computePayloadHash(provider, tools, directAnalysis, history) {
         try {
+            // Stable stringify helper (recursively sort object keys; handle arrays)
+            const stableStringify = (value) => {
+                const seen = new WeakSet();
+                const sortRec = (val) => {
+                    if (val === null || typeof val !== 'object') return val;
+                    if (seen.has(val)) return null;
+                    seen.add(val);
+                    if (Array.isArray(val)) return val.map(sortRec);
+                    const out = {};
+                    Object.keys(val).sort().forEach(k => { out[k] = sortRec(val[k]); });
+                    return out;
+                };
+                try { return JSON.stringify(sortRec(value)); } catch (e) { try { return JSON.stringify(value); } catch { return String(value); } }
+            };
+
             const toolNames = (tools?.functionDeclarations || []).map(t => t.name).sort();
             const historySig = (history || []).map(msg => {
                 // Only include role and lightweight part kinds to avoid huge strings
                 const kinds = (msg.parts || []).map(p => (p.functionCall ? 'fc' : (p.functionResponse ? 'fr' : (p.text ? 't' : 'x'))));
                 return `${msg.role}:${kinds.join('')}`;
             });
+
+            // Summarize the last assistant functionCalls (name + sorted args)
+            let lastFcSummary = '';
+            for (let i = (history || []).length - 1; i >= 0; i--) {
+                const turn = history[i];
+                if (turn.role === 'model' && Array.isArray(turn.parts)) {
+                    const calls = turn.parts
+                        .filter(p => p.functionCall && p.functionCall.name)
+                        .map(p => ({
+                            name: p.functionCall.name,
+                            args: p.functionCall.args || {}
+                        }));
+                    if (calls.length > 0) {
+                        lastFcSummary = stableStringify(calls);
+                        break;
+                    }
+                }
+            }
+
             const sig = {
                 provider,
                 directAnalysis: !!directAnalysis,
                 tools: toolNames,
-                historySig
+                historySig,
+                lastFunctionCallsSummary: lastFcSummary,
+                lastExecutedTools: Array.isArray(this.lastExecutedTools) ? [...this.lastExecutedTools] : []
             };
             return btoa(unescape(encodeURIComponent(JSON.stringify(sig))));
         } catch (e) {
@@ -303,6 +344,110 @@ export const ChatService = {
         let totalRequestTokens = 0;
         let totalResponseTokens = 0;
 
+        // Cross-turn de-dup/convergence tracking
+        let apiTurn = 0;
+        const seenCallFingerprints = new Set();
+        const sessionKeysThisRun = new Set();
+        let lastFunctionCallsFingerprint = null;
+
+        // Stable stringify helper (recursively sort object keys; handle arrays)
+        const stableStringify = (value) => {
+            const seen = new WeakSet();
+            const sortRec = (val) => {
+                if (val === null || typeof val !== 'object') return val;
+                if (seen.has(val)) return null;
+                seen.add(val);
+                if (Array.isArray(val)) return val.map(sortRec);
+                const out = {};
+                Object.keys(val).sort().forEach(k => { out[k] = sortRec(val[k]); });
+                return out;
+            };
+            try { return JSON.stringify(sortRec(value)); } catch (e) { try { return JSON.stringify(value); } catch { return String(value); } }
+        };
+// Canonicalize tool arguments to executor schema (enhanced for comprehensive parameter mapping)
+        const canonicalizeToolArgs = (toolName, inputArgs = {}) => {
+            const out = { ...(inputArgs || {}) };
+            const str = (v) => (typeof v === 'string' ? v.trim() : '');
+            let mappedFrom = null;
+
+            // Enhanced parameter mappings with comprehensive aliases
+            const parameterMappings = {
+                'delete_file': {
+                    target: 'filename',
+                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName']
+                },
+                'delete_folder': {
+                    target: 'folder_path',
+                    aliases: ['path', 'dir', 'directory', 'folder', 'directory_path', 'directoryPath', 'folder_name', 'folderName']
+                },
+                'create_file': {
+                    target: 'filename',
+                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName']
+                },
+                'read_file': {
+                    target: 'filename',
+                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName']
+                },
+                'edit_file': {
+                    target: 'filename',
+                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName']
+                },
+                'rewrite_file': {
+                    target: 'filename',
+                    aliases: ['path', 'file', 'filepath', 'file_path', 'filePath', 'name', 'file_name', 'fileName']
+                }
+            };
+
+            const mapping = parameterMappings[toolName];
+            if (mapping && !str(out[mapping.target])) {
+                console.debug(`[ChatService] Attempting parameter normalization for ${toolName}. Current params:`, Object.keys(out));
+                for (const alias of mapping.aliases) {
+                    const val = str(out[alias]);
+                    if (val) {
+                        out[mapping.target] = val;
+                        if (alias !== mapping.target) {
+                            delete out[alias];
+                            mappedFrom = `${alias} → ${mapping.target}`;
+                        }
+                        console.debug(`[ChatService] ✓ Parameter normalization for ${toolName}: ${mappedFrom}`);
+                        break;
+                    }
+                }
+                
+                if (!mappedFrom) {
+                    console.warn(`[ChatService] ❌ Parameter normalization for ${toolName} failed. Available params:`, Object.keys(out), 'Expected:', mapping.target, 'Aliases:', mapping.aliases);
+                }
+            }
+
+            // Legacy support for existing tools (keep original logic for compatibility)
+            if (toolName === 'delete_folder' && !mappedFrom) {
+                if (!str(out.folder_path)) {
+                    const aliases = ['path', 'dir', 'directory', 'folder', 'directory_path'];
+                    for (const key of aliases) {
+                        const val = str(out[key]);
+                        if (val) {
+                            out.folder_path = val;
+                            if (key !== 'folder_path') {
+                                delete out[key];
+                                mappedFrom = key;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (mappedFrom) {
+                    console.debug(`[ChatService] Normalized args for delete_folder: mapped '${mappedFrom}' to 'folder_path'`);
+                }
+            }
+
+            return out;
+        };
+
+// Priority helper: rank tools so start_task_session runs first when needed
+const getToolPriority = (toolName, sessionAlreadyStartedThisRun) => {
+    if (toolName === 'start_task_session' && !sessionAlreadyStartedThisRun) return 0;
+    return 1;
+};
         // Estimate request tokens
         if (typeof GPTTokenizer_cl100k_base !== 'undefined') {
             const { encode } = GPTTokenizer_cl100k_base;
@@ -312,7 +457,16 @@ export const ChatService = {
         
         let emptyRetryCount = 0;
         while (continueLoop && !this.isCancelled) {
+            // Per-request metrics tracking
+            const reqId = `cs_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const reqStart = performance.now();
+            let hadError = false;
+            let startedStream = false;
+            let metricsRecorded = false;
+
             try {
+                // Increment API turn counter
+                apiTurn++;
                 UI.showThinkingIndicator(chatMessages, 'AI is thinking...');
                 const mode = document.getElementById('agent-mode-selector').value;
                 const customRules = Settings.get(`custom.${mode}.rules`);
@@ -354,10 +508,12 @@ export const ChatService = {
                 }
                 
                 const stream = this.llmService.sendMessageStream(history, tools, customRules, { directAnalysis });
-
+                startedStream = true;
+ 
                 let modelResponseText = '';
                 let displayText = '';
                 functionCalls = []; // Reset for this iteration
+                let seenUsage = false; // Track whether we observed real usage during streaming
 
                 for await (const chunk of stream) {
                     if (this.isCancelled) return;
@@ -372,14 +528,23 @@ export const ChatService = {
                         functionCalls.push(...chunk.functionCalls);
                     }
                     if (chunk.usageMetadata) {
-                        // This is for Gemini, which provides accurate counts
-                        totalRequestTokens = chunk.usageMetadata.promptTokenCount || 0;
-                        totalResponseTokens += chunk.usageMetadata.candidatesTokenCount || 0;
+                        // Provider-agnostic usage handling (Gemini/OpenAI)
+                        const usage = chunk.usageMetadata;
+                        seenUsage = true;
+                        if (typeof usage.promptTokenCount === 'number' || typeof usage.candidatesTokenCount === 'number') {
+                            // Gemini-style
+                            if (typeof usage.promptTokenCount === 'number') totalRequestTokens = usage.promptTokenCount;
+                            if (typeof usage.candidatesTokenCount === 'number') totalResponseTokens = usage.candidatesTokenCount;
+                        } else if (typeof usage.prompt_tokens === 'number' || typeof usage.completion_tokens === 'number') {
+                            // OpenAI-style
+                            if (typeof usage.prompt_tokens === 'number') totalRequestTokens = usage.prompt_tokens;
+                            if (typeof usage.completion_tokens === 'number') totalResponseTokens = usage.completion_tokens;
+                        }
                     }
                 }
 
-                // For OpenAI, estimate response tokens
-                if (typeof GPTTokenizer_cl100k_base !== 'undefined' && this.llmService.constructor.name === 'OpenAIService') {
+                // For OpenAI, estimate response tokens only if no usage was observed
+                if (!seenUsage && typeof GPTTokenizer_cl100k_base !== 'undefined' && this.llmService.constructor.name === 'OpenAIService') {
                     const { encode } = GPTTokenizer_cl100k_base;
                     totalResponseTokens = encode(modelResponseText).length;
                 }
@@ -387,6 +552,37 @@ export const ChatService = {
                 console.log(`[Token Usage] Final totals - Req: ${totalRequestTokens}, Res: ${totalResponseTokens}`);
                 UI.updateTokenDisplay(totalRequestTokens, totalResponseTokens);
                 
+                // Persist per-request LLM metrics for this provider turn
+                try {
+                    const latencyMs = performance.now() - reqStart;
+                    const provider = this.llmService?.constructor?.name || 'UnknownProvider';
+                    const model = this.llmService?.model || 'unknown';
+                    await DbManager.metricsAdd({
+                        ts: Date.now(),
+                        provider,
+                        model,
+                        requestId: reqId,
+                        inputTokens: totalRequestTokens || 0,
+                        outputTokens: totalResponseTokens || 0,
+                        totalTokens: (totalRequestTokens || 0) + (totalResponseTokens || 0),
+                        latencyMs,
+                        success: !hadError
+                    });
+                    metricsRecorded = true;
+
+                    // Update in-memory session totals and live badge (exactly once per provider turn)
+                    try {
+                        this.sessionTotals.requests += 1;
+                        this.sessionTotals.inputTokens += totalRequestTokens || 0;
+                        this.sessionTotals.outputTokens += totalResponseTokens || 0;
+                        this.sessionTotals.totalTokens = this.sessionTotals.inputTokens + this.sessionTotals.outputTokens;
+                        UI.updateMetricsBadge(this.sessionTotals);
+                    } catch (e2) {
+                        console.warn('[ChatService] Failed to update metrics badge:', e2?.message || e2);
+                    }
+                } catch (e) {
+                    console.warn('[ChatService] Failed to persist metrics:', e?.message || e);
+                }
                 // Provider-agnostic empty-turn retry and protection
                 if (!modelResponseText && functionCalls.length === 0) {
                     if (emptyRetryCount < 1) {
@@ -418,7 +614,7 @@ export const ChatService = {
                         .map((call) => {
                             const name = call.name;
                             const rawArgs = call.args || {};
-                            const args = { ...rawArgs };
+                            let args = { ...rawArgs };
 
                             // Common key normalization: snake_case -> camelCase
                             if ('task_id' in args && !('taskId' in args)) args.taskId = args.task_id;
@@ -435,23 +631,8 @@ export const ChatService = {
                                 return { ...call, name: 'get_project_structure', args: {} };
                             }
 
-                            // Destructive tools: normalize common miskeys to 'path'
-                            if (name === 'delete_file' || name === 'delete_folder') {
-                                const pathKeys = ['path','filename','file','file_path','filepath','target','folder_path','dir','directory','directory_path'];
-                                for (const k of pathKeys) {
-                                    if (args[k] && typeof args.path !== 'string') {
-                                        args.path = args[k];
-                                        break;
-                                    }
-                                }
-                                // Cleanup: remove alias keys to reduce confusion
-                                ['filename','file','file_path','filepath','target','folder_path','dir','directory','directory_path'].forEach(k => { if (k in args) delete args[k]; });
-
-                                // Basic sanity for path
-                                if (typeof args.path === 'string') {
-                                    args.path = args.path.trim();
-                                }
-                            }
+                            // Canonicalize arguments to the executor's expected schema
+                            args = canonicalizeToolArgs(name, args);
 
                             // Single-use guard: ignore task_breakdown if the task already broke down once
                             if (name === 'task_breakdown') {
@@ -505,13 +686,25 @@ export const ChatService = {
                                 }
                             }
 
-                            // Guard: drop destructive calls with no usable parameters, add UI hint
-                            if ((name === 'delete_file' || name === 'delete_folder')) {
-                                const hasPath = args && typeof args.path === 'string' && args.path.length > 0;
-                                if (!hasPath) {
-                                    console.warn(`[ChatService] Skipping ${name}: missing required "path" parameter after normalization.`);
-                                    UI.appendMessage(chatMessages, `Skipped ${name}: missing required "path" parameter. Use { path: "<relative path>" }.`, 'ai-muted');
+                            // Guard: drop destructive calls with no usable parameters, add UI hint (post-canonicalization)
+                            if (name === 'delete_folder') {
+                                const ok = args && typeof args.folder_path === 'string' && args.folder_path.length > 0;
+                                if (!ok) {
+                                    console.warn(`[ChatService] Skipping delete_folder: missing required "folder_path" parameter after normalization.`);
+                                    UI.appendMessage(chatMessages, `Skipped delete_folder: missing required "folder_path" parameter. Use { folder_path: "<relative path>" }.`, 'ai-muted');
                                     return null;
+                                }
+                            } else if (name === 'delete_file') {
+                                if (!(args && typeof args.filename === 'string' && args.filename.length > 0)) {
+                                    if (args && typeof args.file_path === 'string' && args.file_path.trim().length > 0) {
+                                        args.filename = args.file_path.trim();
+                                        delete args.file_path;
+                                        console.debug(`[ChatService] Normalized args for delete_file: mapped 'file_path' to 'filename'`);
+                                    } else {
+                                        console.warn(`[ChatService] Skipping delete_file: missing required "filename" parameter after normalization.`);
+                                        UI.appendMessage(chatMessages, `Skipped delete_file: missing required "filename" parameter. Use { filename: "<relative path>" }.`, 'ai-muted');
+                                        return null;
+                                    }
                                 }
                             }
 
@@ -519,16 +712,82 @@ export const ChatService = {
                         })
                         .filter(Boolean); // remove skipped calls
 
-                    // If current iteration forbids tools (e.g., empty-turn retry), ignore any function calls
-                    if (!currentUseTools) {
-                        if (normalizedCalls.length > 0) {
-                            console.warn('[ChatService] Tools are disabled for this iteration; ignoring emitted tool calls.');
+    // Hotfix: prioritize start_task_session before execution/fingerprinting if not started this run
+    const hasStartTaskSession = normalizedCalls.some(c => c && c.name === 'start_task_session');
+    const sessionAlreadyStartedThisRun = Array.isArray(this.lastExecutedTools) && this.lastExecutedTools.includes('start_task_session');
+    if (hasStartTaskSession && !sessionAlreadyStartedThisRun) {
+        const originalOrderSig = normalizedCalls.map(c => c.name).join('|');
+        normalizedCalls = normalizedCalls
+            .map((c, idx) => ({ c, idx }))
+            .sort((a, b) => {
+                const pa = getToolPriority(a.c.name, sessionAlreadyStartedThisRun);
+                const pb = getToolPriority(b.c.name, sessionAlreadyStartedThisRun);
+                if (pa !== pb) return pa - pb;
+                return a.idx - b.idx; // stable tie-breaker
+            })
+            .map(x => x.c);
+        if (normalizedCalls.map(c => c.name).join('|') !== originalOrderSig) {
+            console.debug('Reordered tool calls: start_task_session prioritized this turn.');
+        }
+    }
+
+                        // Count prior to de-dup/guards
+                        const normalizedCallsBeforeFiltering = normalizedCalls.length;
+
+                        // Cross-iteration fingerprint de-dup and session guard
+                        const guardedCalls = [];
+                        for (const call of normalizedCalls) {
+                            if (!call) continue;
+
+                            // start_task_session guard
+                            if (call.name === 'start_task_session') {
+                                const key = (call.args && (call.args.taskId != null))
+                                    ? String(call.args.taskId)
+                                    : (call.args && call.args.title ? String(call.args.title).trim() : '');
+                                if (this.lastExecutedTools.includes('start_task_session') || (key && sessionKeysThisRun.has(key))) {
+                                    UI.appendMessage(chatMessages, 'Session already active this run — skipping start_task_session', 'ai-muted');
+                                    continue;
+                                }
+                                if (key) sessionKeysThisRun.add(key);
+                            }
+
+                            // Tool-call fingerprint de-dup across iterations
+                            const fp = `${call.name}:${stableStringify(call.args || {})}`;
+                            if (seenCallFingerprints.has(fp)) {
+                                UI.appendMessage(chatMessages, `Skipped repeated tool call: ${call.name}`, 'ai-muted');
+                                continue;
+                            }
+                            // Accept call and record fingerprint for this run
+                            seenCallFingerprints.add(fp);
+                            guardedCalls.push(call);
                         }
-                        normalizedCalls = [];
-                    }
+                        normalizedCalls = guardedCalls;
+
+                        // Convergence/no-op break: identical emitted tool calls repeated across iterations
+                        try {
+                            // Build fingerprint from final, canonicalized, possibly-reordered calls
+                            const currentFcFpList = (normalizedCalls || []).map(fc => `${fc.name}:${stableStringify(fc.args || {})}`);
+                            const currentFcListFp = stableStringify(currentFcFpList);
+                            if (lastFunctionCallsFingerprint && currentFcListFp === lastFunctionCallsFingerprint) {
+                                UI.appendMessage(chatMessages, 'No-op: identical tool calls repeated; stopping.', 'ai-muted');
+                                break;
+                            }
+                            lastFunctionCallsFingerprint = currentFcListFp;
+                        } catch (e) {
+                            // Non-fatal: continue
+                        }
+
+                        // If current iteration forbids tools (e.g., empty-turn retry), ignore any function calls
+                        if (!currentUseTools) {
+                            if (normalizedCalls.length > 0) {
+                                console.warn('[ChatService] Tools are disabled for this iteration; ignoring emitted tool calls.');
+                            }
+                            normalizedCalls = [];
+                        }
 
                     // Execute all tools sequentially for all providers
                     const toolResults = [];
+                    let executedToolCount = 0;
                     for (const call of normalizedCalls) {
                         if (this.isCancelled) return;
                         console.log(`Executing tool: ${call.name} sequentially...`);
@@ -541,6 +800,7 @@ export const ChatService = {
                             const succeeded = resp && !resp.error;
                             if (succeeded) {
                                 this.lastExecutedTools.push(call.name);
+                                executedToolCount++;
                             } else {
                                 console.warn(`[ChatService] Tool "${call.name}" did not succeed; not counted as destructive evidence.`);
                             }
@@ -562,14 +822,10 @@ export const ChatService = {
                     if (singleTurn) {
                         continueLoop = false;
                     } else {
-                        // For OpenAI: Continue the loop to get AI's next response
-                        // For other providers (Gemini, Ollama): Check if AI wants to continue with more tools
-                        if (this.llmService.constructor.name === 'OpenAIService') {
-                            continueLoop = true; // Always continue for OpenAI to get next response
-                        } else {
-                            // For Gemini/Ollama: Continue the loop to allow them to make more tool calls if needed
-                            continueLoop = true;
-                        }
+                        // Continue only when the model emitted tool calls, at least one tool executed,
+                        // and we are still under the iteration cap.
+                        const hadNormalizedBeforeFiltering = typeof normalizedCallsBeforeFiltering !== 'undefined' && normalizedCallsBeforeFiltering > 0;
+                        continueLoop = hadNormalizedBeforeFiltering && executedToolCount > 0;
                     }
                 } else {
                     // No tools called, conversation is complete
@@ -577,9 +833,43 @@ export const ChatService = {
                 }
 
             } catch (error) {
+                hadError = true;
                 console.error(`Error during API call with ${this.llmService.constructor.name}:`, error);
                 console.error(`Error stack:`, error.stack); // Log the stack trace
                 UI.showError(`An error occurred during AI communication: ${error.message}. Please check your API key and network connection.`);
+                // Attempt to persist metrics even on error if a stream was started
+                try {
+                    if (startedStream && !metricsRecorded) {
+                        const latencyMs = performance.now() - reqStart;
+                        const provider = this.llmService?.constructor?.name || 'UnknownProvider';
+                        const model = this.llmService?.model || 'unknown';
+                        await DbManager.metricsAdd({
+                            ts: Date.now(),
+                            provider,
+                            model,
+                            requestId: reqId,
+                            inputTokens: totalRequestTokens || 0,
+                            outputTokens: totalResponseTokens || 0,
+                            totalTokens: (totalRequestTokens || 0) + (totalResponseTokens || 0),
+                            latencyMs,
+                            success: false
+                        });
+                        metricsRecorded = true;
+
+                        // Update in-memory session totals and live badge (exactly once per provider turn)
+                        try {
+                            this.sessionTotals.requests += 1;
+                            this.sessionTotals.inputTokens += totalRequestTokens || 0;
+                            this.sessionTotals.outputTokens += totalResponseTokens || 0;
+                            this.sessionTotals.totalTokens = this.sessionTotals.inputTokens + this.sessionTotals.outputTokens;
+                            UI.updateMetricsBadge(this.sessionTotals);
+                        } catch (e2) {
+                            console.warn('[ChatService] Failed to update metrics badge:', e2?.message || e2);
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[ChatService] Failed to persist error metrics:', e?.message || e);
+                }
                 continueLoop = false;
             }
         }

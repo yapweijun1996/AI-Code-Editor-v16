@@ -1,5 +1,6 @@
 import { buildTree, getIgnorePatterns } from './file_system.js';
 import { Settings, dispatchLLMSettingsUpdated } from './settings.js';
+import { DbManager } from './db.js';
 
 export function initResizablePanels(editor) {
     window.splitInstance = Split(['#file-tree-container', '#editor-container', '#chat-panel'], {
@@ -661,6 +662,163 @@ export function updateTodoList(todoItems) {
             listItem.className = `todo-item status-${item.status}`;
             listItem.innerHTML = `<span class="status-icon"></span> ${item.task}`;
             list.appendChild(listItem);
+        });
+    }
+}
+
+// ================= Metrics Badge & Drawer (Minimal UI) =================
+
+/**
+ * Persistent, lightweight badge that shows live session totals.
+ * Text: "LLM: Req {requests} • In {inputTokens} • Out {outputTokens} • Total {totalTokens}"
+ * Positioned bottom-right with minimal styling.
+ */
+export function updateMetricsBadge(totals = { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 }) {
+    try {
+        let badge = document.getElementById('metrics-badge');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'metrics-badge';
+            // Positioning and style
+            badge.style.position = 'fixed';
+            badge.style.bottom = '12px';
+            badge.style.right = '12px';
+            badge.style.zIndex = '9999';
+            badge.style.background = 'rgba(0, 0, 0, 0.75)';
+            badge.style.color = '#fff';
+            badge.style.padding = '6px 10px';
+            badge.style.borderRadius = '12px';
+            badge.style.fontSize = '12px';
+            badge.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+            badge.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
+            badge.style.cursor = 'pointer';
+            badge.style.userSelect = 'none';
+            badge.title = 'Click to view aggregate metrics';
+            badge.onclick = () => toggleMetricsDrawer();
+            document.body.appendChild(badge);
+        }
+        const fmt = (n) => (Number.isFinite(n) ? n : 0).toLocaleString();
+        badge.textContent = `LLM: Req ${fmt(totals.requests)} • In ${fmt(totals.inputTokens)} • Out ${fmt(totals.outputTokens)} • Total ${fmt(totals.totalTokens)}`;
+    } catch (e) {
+        console.warn('[UI] Failed to update metrics badge:', e?.message || e);
+    }
+}
+
+/**
+ * Ensure the metrics drawer exists. Creates a minimal panel with header and content body.
+ * Drawer style: fixed, right: 12px, bottom: 56px, width: 320px, max-height: 50vh, overflow-y: auto.
+ */
+function ensureMetricsDrawer() {
+    let drawer = document.getElementById('metrics-drawer');
+    if (drawer) return drawer;
+
+    drawer = document.createElement('div');
+    drawer.id = 'metrics-drawer';
+    drawer.style.position = 'fixed';
+    drawer.style.right = '12px';
+    drawer.style.bottom = '56px';
+    drawer.style.width = '320px';
+    drawer.style.maxHeight = '50vh';
+    drawer.style.overflowY = 'auto';
+    drawer.style.background = 'var(--drawer-bg, #f9f9fb)';
+    drawer.style.color = 'inherit';
+    drawer.style.border = '1px solid rgba(0,0,0,0.1)';
+    drawer.style.borderRadius = '8px';
+    drawer.style.boxShadow = '0 6px 16px rgba(0,0,0,0.15)';
+    drawer.style.padding = '8px';
+    drawer.style.zIndex = '9999';
+    drawer.style.display = 'none';
+
+    // Header
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.alignItems = 'center';
+    header.style.justifyContent = 'space-between';
+    header.style.marginBottom = '6px';
+
+    const title = document.createElement('div');
+    title.textContent = 'LLM Metrics';
+    title.style.fontWeight = '600';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.style.fontSize = '16px';
+    closeBtn.style.lineHeight = '16px';
+    closeBtn.style.border = 'none';
+    closeBtn.style.background = 'transparent';
+    closeBtn.style.cursor = 'pointer';
+    closeBtn.onclick = () => toggleMetricsDrawer();
+
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    const content = document.createElement('div');
+    content.id = 'metrics-drawer-content';
+    content.textContent = 'Loading...';
+    content.style.fontSize = '12px';
+
+    drawer.appendChild(header);
+    drawer.appendChild(content);
+    document.body.appendChild(drawer);
+
+    return drawer;
+}
+
+/**
+ * Toggle the metrics drawer visibility. When opening, refresh the summary.
+ */
+export function toggleMetricsDrawer() {
+    const drawer = ensureMetricsDrawer();
+    const isOpen = drawer.style.display !== 'none';
+    if (isOpen) {
+        drawer.style.display = 'none';
+    } else {
+        drawer.style.display = 'block';
+        refreshMetricsDrawer();
+    }
+}
+
+/**
+ * Render aggregate summary into the drawer body.
+ * Summary shape:
+ * { requestCount, successCount, failureCount, inputTokens, outputTokens, totalTokens, averageLatencyMs }
+ */
+export function renderMetricsSummary(summary = { requestCount: 0, successCount: 0, failureCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, averageLatencyMs: 0 }) {
+    const content = document.getElementById('metrics-drawer-content') || ensureMetricsDrawer().querySelector('#metrics-drawer-content');
+    if (!content) return;
+
+    const fmt = (n) => (Number.isFinite(n) ? n : 0).toLocaleString();
+    const fmtMs = (n) => `${Math.round(Number.isFinite(n) ? n : 0).toLocaleString()} ms`;
+
+    content.innerHTML = `
+        <div style="display:flex; flex-direction:column; gap:4px;">
+            <div><strong>Requests:</strong> ${fmt(summary.requestCount)}</div>
+            <div><strong>Success:</strong> ${fmt(summary.successCount)} • <strong>Failure:</strong> ${fmt(summary.failureCount)}</div>
+            <div><strong>Tokens:</strong> In ${fmt(summary.inputTokens)} • Out ${fmt(summary.outputTokens)} • Total ${fmt(summary.totalTokens)}</div>
+            <div><strong>Avg Latency:</strong> ${fmtMs(summary.averageLatencyMs)}</div>
+        </div>
+    `;
+}
+
+/**
+ * Load aggregate metrics from IndexedDB and render into the drawer.
+ * Uses DbManager.metricsGetSummary() with no filters.
+ */
+export async function refreshMetricsDrawer() {
+    try {
+        const { summary } = await DbManager.metricsGetSummary();
+        renderMetricsSummary(summary || {});
+    } catch (e) {
+        console.warn('[UI] Failed to refresh metrics drawer:', e?.message || e);
+        renderMetricsSummary({
+            requestCount: 0,
+            successCount: 0,
+            failureCount: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            averageLatencyMs: 0
         });
     }
 }

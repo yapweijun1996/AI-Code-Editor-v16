@@ -60,9 +60,14 @@ export class GeminiService extends BaseLLMService {
                     chat.sendMessageStream(lastUserMessage),
                     timeoutPromise
                 ]);
-
+                
+                let lastUsage = null;
+                
                 try {
                     for await (const chunk of result.stream) {
+                        if (chunk.usageMetadata) {
+                            lastUsage = chunk.usageMetadata;
+                        }
                         yield {
                             text: chunk.text(),
                             functionCalls: chunk.functionCalls(),
@@ -81,7 +86,15 @@ export class GeminiService extends BaseLLMService {
                     retriableError.originalError = streamError;
                     throw retriableError;
                 }
-
+                
+                if (lastUsage !== null) {
+                    yield {
+                        text: "",
+                        functionCalls: null,
+                        usageMetadata: lastUsage,
+                    };
+                }
+                
                 // If we get here, the request was successful
                 return;
 
@@ -207,6 +220,7 @@ export class GeminiService extends BaseLLMService {
         const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         const timeString = new Date().toLocaleString();
         
+        let systemInstructionText;
         
         const baseCodePrompt = `You are Gemini, an elite AI programming agent with advanced reasoning capabilities. Your function is to solve complex programming problems through systematic analysis and precise code manipulation.
 
@@ -396,7 +410,6 @@ Current context:
 - Time: ${timeString}
 - Timezone: ${timeZone}`;
 
-        let systemInstructionText;
         if (mode === 'plan') {
             systemInstructionText = newPlanPrompt;
         } else if (mode === 'search') {

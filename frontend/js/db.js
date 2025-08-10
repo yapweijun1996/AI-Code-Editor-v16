@@ -12,11 +12,12 @@ export const DbManager = {
         customRules: 'customRules',
         chatHistory: 'chatHistory',
         toolLogs: 'tool_logs',
+        metrics: 'metrics',
     },
     async openDb() {
         return new Promise((resolve, reject) => {
             if (this.db) return resolve(this.db);
-            const request = indexedDB.open(this.dbName, 11);
+            const request = indexedDB.open(this.dbName, 12);
             request.onerror = () => reject('Error opening IndexedDB.');
             request.onsuccess = (event) => {
                 this.db = event.target.result;
@@ -53,6 +54,13 @@ export const DbManager = {
                     const logStore = db.createObjectStore(this.stores.toolLogs, { autoIncrement: true, keyPath: 'id' });
                     logStore.createIndex('timestamp', 'timestamp', { unique: false });
                     logStore.createIndex('toolName', 'toolName', { unique: false });
+                }
+                // Create metrics store for per-request LLM metrics
+                if (!db.objectStoreNames.contains(this.stores.metrics)) {
+                    const metricsStore = db.createObjectStore(this.stores.metrics, { keyPath: 'id', autoIncrement: true });
+                    metricsStore.createIndex('ts', 'ts', { unique: false });
+                    metricsStore.createIndex('provider', 'provider', { unique: false });
+                    metricsStore.createIndex('model', 'model', { unique: false });
                 }
             };
         });
@@ -290,6 +298,112 @@ export const DbManager = {
                 .delete('current_chat');
             request.onerror = () => reject('Error clearing chat history.');
             request.onsuccess = () => resolve();
+        });
+    },
+
+    // === Metrics APIs =========================================================
+    // Adds a per-request metrics record
+    async metricsAdd(record) {
+        const db = await this.openDb();
+        const r = record || {};
+        const inputTokens = Number.isFinite(r.inputTokens) ? r.inputTokens : 0;
+        const outputTokens = Number.isFinite(r.outputTokens) ? r.outputTokens : 0;
+        const normalized = {
+            ts: typeof r.ts === 'number' ? r.ts : Date.now(),
+            provider: typeof r.provider === 'string' ? r.provider : 'UnknownProvider',
+            model: typeof r.model === 'string' ? r.model : 'unknown',
+            requestId: typeof r.requestId === 'string' ? r.requestId : `req_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+            inputTokens,
+            outputTokens,
+            totalTokens: Number.isFinite(r.totalTokens) ? r.totalTokens : (inputTokens + outputTokens),
+            latencyMs: Number.isFinite(r.latencyMs) ? r.latencyMs : 0,
+            success: typeof r.success === 'boolean' ? r.success : true,
+            errorCategory: (typeof r.errorCategory === 'string' && r.errorCategory) ? r.errorCategory : null
+        };
+        return new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction(this.stores.metrics, 'readwrite');
+                const store = tx.objectStore(this.stores.metrics);
+                const req = store.put(normalized);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject('Error adding metrics record.');
+            } catch (e) {
+                reject('Error adding metrics record.');
+            }
+        });
+    },
+
+    // Returns aggregate summary over metrics records
+    async metricsGetSummary(filters = {}) {
+        const db = await this.openDb();
+        const { since, provider, model } = filters || {};
+        const summary = {
+            requestCount: 0,
+            successCount: 0,
+            failureCount: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            averageLatencyMs: 0
+        };
+        return new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction(this.stores.metrics, 'readonly');
+                const store = tx.objectStore(this.stores.metrics);
+
+                const hasSince = typeof since === 'number';
+                const hasProvider = typeof provider === 'string' && provider.length > 0;
+                const hasModel = typeof model === 'string' && model.length > 0;
+                const filtersCount = (hasSince ? 1 : 0) + (hasProvider ? 1 : 0) + (hasModel ? 1 : 0);
+
+                let request;
+                if (filtersCount === 1 && hasSince) {
+                    request = store.index('ts').openCursor(IDBKeyRange.lowerBound(since));
+                } else if (filtersCount === 1 && hasProvider) {
+                    request = store.index('provider').openCursor(IDBKeyRange.only(provider));
+                } else if (filtersCount === 1 && hasModel) {
+                    request = store.index('model').openCursor(IDBKeyRange.only(model));
+                } else {
+                    request = store.openCursor();
+                }
+
+                let sumLatency = 0;
+                request.onsuccess = (event) => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        const val = cursor.value || {};
+                        // Apply full filter set in code for correctness
+                        if ((!hasSince || (typeof val.ts === 'number' && val.ts >= since)) &&
+                            (!hasProvider || val.provider === provider) &&
+                            (!hasModel || val.model === model)) {
+                            const inTok = Number(val.inputTokens) || 0;
+                            const outTok = Number(val.outputTokens) || 0;
+                            const totTok = Number(val.totalTokens);
+                            const lat = Number(val.latencyMs) || 0;
+
+                            summary.requestCount += 1;
+                            if (val.success === false) {
+                                summary.failureCount += 1;
+                            } else {
+                                summary.successCount += 1;
+                            }
+                            summary.inputTokens += inTok;
+                            summary.outputTokens += outTok;
+                            summary.totalTokens += Number.isFinite(totTok) ? totTok : (inTok + outTok);
+                            sumLatency += lat;
+                        }
+                        cursor.continue();
+                    } else {
+                        summary.averageLatencyMs = summary.requestCount > 0 ? (sumLatency / summary.requestCount) : 0;
+                        resolve({ summary });
+                    }
+                };
+                request.onerror = () => {
+                    resolve({ summary }); // Fail-soft: return zeros
+                };
+            } catch (e) {
+                resolve({ summary }); // Fail-soft
+            }
         });
     },
 

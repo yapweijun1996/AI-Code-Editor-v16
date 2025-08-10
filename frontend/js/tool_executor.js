@@ -882,7 +882,9 @@ async function _rewriteFile({ filename, content }, rootHandle) {
 }
 
 async function _deleteFile({ filename }, rootHandle) {
-    if (!filename) throw new Error("The 'filename' parameter is required for delete_file.");
+    if (!filename) {
+        throw new Error("The 'filename' parameter is required for delete_file. Accepted parameter names: filename, path, file, filepath, file_path");
+    }
     if (typeof filename !== 'string') throw new Error("The 'filename' parameter must be a string.");
     
     try {
@@ -3807,6 +3809,9 @@ async function executeTool(toolCall, rootDirectoryHandle) {
         throw new Error(`Unknown tool '${toolName}'.`);
     }
 
+    // Log tool call details for debugging
+    console.debug(`[ToolExecutor] Executing ${toolName} with args:`, parameters);
+
     if (tool.requiresProject && !rootDirectoryHandle) {
         return { error: "No project folder is open. Please ask the user to open a folder before using this tool." };
     }
@@ -3933,7 +3938,7 @@ export function getToolDefinitions() {
     return {
         functionDeclarations: [
             { name: 'create_file', description: "Creates a new file. CRITICAL: Do NOT include the root directory name in the path. Example: To create 'app.js' in the root, the path is 'app.js', NOT 'my-project/app.js'.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, content: { type: 'STRING', description: 'The raw text content of the file. CRITICAL: Do NOT wrap this content in markdown backticks (```).' } }, required: ['filename', 'content'] } },
-            { name: 'delete_file', description: "Deletes a file. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING' } }, required: ['filename'] } },
+            { name: 'delete_file', description: "Deletes a file. Use { filename: 'path/to/file.js' }. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { filename: { type: 'STRING', description: 'Path to the file to delete (relative to project root)' } }, required: ['filename'] } },
             { name: 'create_folder', description: "Creates a new folder. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { folder_path: { type: 'STRING' } }, required: ['folder_path'] } },
             { name: 'delete_folder', description: "Deletes a folder and all its contents. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { folder_path: { type: 'STRING' } }, required: ['folder_path'] } },
             { name: 'rename_folder', description: "Renames a folder. CRITICAL: Do NOT include the root directory name in the path.", parameters: { type: 'OBJECT', properties: { old_folder_path: { type: 'STRING' }, new_folder_path: { type: 'STRING' } }, required: ['old_folder_path', 'new_folder_path'] } },

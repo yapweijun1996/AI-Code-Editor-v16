@@ -40,6 +40,7 @@ export class OpenAIService extends BaseLLMService {
                 tools: toolDefinitions,
                 tool_choice: "auto",
                 stream: true,
+                stream_options: { include_usage: true }
             }),
             signal: controller.signal,
         });
@@ -74,7 +75,18 @@ export class OpenAIService extends BaseLLMService {
                     }
                     try {
                         const json = JSON.parse(data);
+                        
+                        // Handle chunks with empty choices array (e.g., final usage chunk)
+                        if (!json.choices || json.choices.length === 0) {
+                            if (json.usage) {
+                                // Forward streamed usage to ChatService
+                                yield { text: '', functionCalls: null, usage: json.usage };
+                            }
+                            continue;
+                        }
+                        
                         const delta = json.choices[0].delta;
+                        if (!delta) continue;
 
                         if (delta.content) {
                             yield { text: delta.content, functionCalls: null };
@@ -85,7 +97,8 @@ export class OpenAIService extends BaseLLMService {
                         }
                         
                         if (json.usage) {
-                             console.log('[OpenAI Service] Received usage data (but it will not be used):', json.usage);
+                             // Forward streamed usage to ChatService
+                             yield { text: '', functionCalls: null, usageMetadata: json.usage };
                         }
 
                     } catch (e) {
