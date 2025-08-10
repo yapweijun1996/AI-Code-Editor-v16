@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Format Code - Backend Prettier API Test</title>
+  <style>
+    :root{
+      --bg:#0f1115;--panel:#151820;--text:#e6e6e6;--muted:#9aa4b2;--accent:#3b82f6;--border:#232838;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    header{padding:16px 20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(59,130,246,0.12),transparent 60%)}
+    h1{margin:0 0 6px;font-size:18px}
+    .subtitle{color:var(--muted);font-size:13px}
+    main{max-width:1100px;margin:0 auto;padding:16px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
+    .field{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    input[type=text]{background:#0d1117;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;min-width:360px}
+    button{background:#238636;border:0;color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer}
+    button.secondary{background:#30363d}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .split{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .box{display:flex;flex-direction:column;gap:6px}
+    textarea{width:100%;height:320px;background:#0d1117;border:1px solid var(--border);border-radius:8px;color:#e6edf3;padding:10px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-size:12px;white-space:pre}
+    .log{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:8px;height:180px;overflow:auto;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-size:12px;white-space:pre-wrap}
+    .hint{color:var(--muted);font-size:12px}
+    .badge{display:inline-block;font-size:10px;padding:2px 6px;border-radius:999px;border:1px solid var(--border);color:var(--muted);margin-left:6px}
+    a{color:#93c5fd}
+    .status{font-size:12px;margin-left:8px}
+    .pass{color:#3fb950}
+    .fail{color:#f85149}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Format Code <span class="badge">HTTP POST /api/format-code</span></h1>
+    <div class="subtitle">Use Prettier via backend to format a file on disk. Works best with files within the served project (e.g., frontend/...).</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="row field">
+        <label for="filename">Filename:</label>
+        <input id="filename" type="text" placeholder="e.g. frontend/js/main.js">
+        <button id="loadBtn" class="secondary">Load Before (static GET)</button>
+        <button id="formatBtn">Format File</button>
+        <button id="reloadBtn" class="secondary">Load After (static GET)</button>
+        <span id="status" class="status"></span>
+      </div>
+      <div class="hint">
+        Notes:
+        <ul>
+          <li>Static GET can only load files exposed by the server (e.g., under frontend/). Backend formatting can target any project file.</li>
+          <li>If the file is not served statically, use your editor to inspect the formatted result on disk.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="split">
+      <div class="box">
+        <div>Before (static fetch)</div>
+        <textarea id="before" readonly></textarea>
+      </div>
+      <div class="box">
+        <div>After (static fetch)</div>
+        <textarea id="after" readonly></textarea>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:12px">
+      <div>Log</div>
+      <div id="log" class="log"></div>
+    </section>
+
+    <section class="panel" style="margin-top:12px">
+      <div class="hint">
+        Tips:
+        <ul>
+          <li>Try a JS/TS/JSON/HTML/CSS file for clearer Prettier output.</li>
+          <li>If formatting fails with "Could not infer parser", ensure the extension is supported or add a Prettier config.</li>
+          <li>Endpoint implemented at <code>backend/index.js</code>. It writes the formatted content back to the file.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+<script>
+(function(){
+  const $ = (s)=>document.querySelector(s);
+  const elFilename = $('#filename');
+  const elBefore = $('#before');
+  const elAfter = $('#after');
+  const elLog = $('#log');
+  const elLoad = $('#loadBtn');
+  const elFormat = $('#formatBtn');
+  const elReload = $('#reloadBtn');
+  const elStatus = $('#status');
+
+  function log(msg){
+    const time = new Date().toISOString().split('T')[1].replace('Z','');
+    elLog.textContent += '['+time+'] ' + msg + '\n';
+    elLog.scrollTop = elLog.scrollHeight;
+  }
+  function setStatus(text, cls){
+    elStatus.textContent = text || '';
+    elStatus.classList.remove('pass','fail');
+    if (cls) elStatus.classList.add(cls);
+  }
+  function previewJSON(obj, max=800){
+    try{
+      const s = JSON.stringify(obj, null, 2);
+      return s.length>max ? s.slice(0,max)+'…' : s;
+    }catch{ return String(obj); }
+  }
+
+  async function fetchStaticFile(path){
+    // Only works for server-exposed paths (e.g., frontend/*)
+    const base = path.startsWith('/') ? path : ('/' + path);
+    try{
+      const res = await fetch(base, { method:'GET' });
+      if(!res.ok){
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return await res.text();
+    }catch(e){
+      throw e;
+    }
+  }
+
+  async function postJSON(url, body){
+    const payload = JSON.stringify(body||{});
+    try{
+      const res = await fetch(url, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: payload
+      });
+      const data = await res.json().catch(()=> ({}));
+      return { ok: res.ok, status: res.status, data };
+    }catch(e){
+      return { ok:false, status:0, data:{ error: e.message } };
+    }
+  }
+
+  async function onLoadBefore(){
+    const filename = elFilename.value.trim();
+    if(!filename){
+      log('Please enter a filename.');
+      return;
+    }
+    setStatus('Loading before...', null);
+    elBefore.value = '';
+    try{
+      log(`---> GET (static) ${filename}`);
+      const txt = await fetchStaticFile(filename);
+      elBefore.value = txt;
+      setStatus('Loaded before', 'pass');
+      log('Loaded before (static).');
+    }catch(e){
+      setStatus('Load failed', 'fail');
+      log(`Load before FAILED: ${e.message}`);
+    }
+  }
+
+  async function onFormat(){
+    const filename = elFilename.value.trim();
+    if(!filename){
+      log('Please enter a filename.');
+      return;
+    }
+    setStatus('Formatting...', null);
+    elFormat.disabled = true;
+    try{
+      log(`---> POST /api/format-code`);
+      log(`     Payload: ${JSON.stringify({ filename })}`);
+      const r = await postJSON('/api/format-code', { filename });
+      log(`     Response: HTTP ${r.status}`);
+      if(!r.ok){
+        log('     FAIL details: ' + previewJSON(r.data));
+        setStatus('Format failed', 'fail');
+        return;
+      }
+      log('Format PASS: ' + (r.data && (r.data.message || 'OK')));
+      setStatus('Formatted', 'pass');
+    }finally{
+      elFormat.disabled = false;
+    }
+  }
+
+  async function onLoadAfter(){
+    const filename = elFilename.value.trim();
+    if(!filename){
+      log('Please enter a filename.');
+      return;
+    }
+    setStatus('Loading after...', null);
+    elAfter.value = '';
+    try{
+      log(`---> GET (static) ${filename}`);
+      const txt = await fetchStaticFile(filename);
+      elAfter.value = txt;
+      setStatus('Loaded after', 'pass');
+      log('Loaded after (static).');
+    }catch(e){
+      setStatus('Load failed', 'fail');
+      log(`Load after FAILED: ${e.message}`);
+    }
+  }
+
+  // Prefill a common file for convenience if exists
+  elFilename.value = 'frontend/js/main.js';
+
+  elLoad.addEventListener('click', onLoadBefore);
+  elFormat.addEventListener('click', onFormat);
+  elReload.addEventListener('click', onLoadAfter);
+})();
+</script>
+</body>
+</html>

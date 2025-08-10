@@ -160,6 +160,59 @@
     <div class="note">Implemented via copy+delete using the File System Access API to simulate rename/move.</div>
   </section>
 
+  <!-- Folder Operations (Backend /api/execute-tool) -->
+  <section class="panel" id="folderPanel" style="margin-top:16px">
+    <h2>Folder Operations (Backend)</h2>
+    <div class="note">These use the backend /api/execute-tool endpoint: create_folder, rename_folder, delete_folder.</div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="createFolderPath" class="half" type="text" placeholder="Folder path (e.g., tmp/new-folder)"/>
+      <button id="btnCreateFolder" class="btn btn-ok">Create Folder</button>
+    </div>
+    <div id="createFolderStatus" class="status"></div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="renameFolderOld" class="half" type="text" placeholder="Old folder path (e.g., tmp/new-folder)"/>
+      <input id="renameFolderNew" class="half" type="text" placeholder="New folder path (e.g., tmp/renamed-folder)"/>
+    </div>
+    <div class="row">
+      <button id="btnRenameFolder" class="btn btn-ok">Rename Folder</button>
+    </div>
+    <div id="renameFolderStatus" class="status"></div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="deleteFolderPath" class="half" type="text" placeholder="Folder path to delete (e.g., tmp/renamed-folder)"/>
+      <button id="btnDeleteFolder" class="btn btn-warn">Delete Folder</button>
+    </div>
+    <div id="deleteFolderStatus" class="status"></div>
+  </section>
+
+  <!-- Auto Assertions for Folder Ops -->
+  <section class="panel" id="folderAssertPanel" style="margin-top:16px">
+    <h2>Folder Auto Assertions</h2>
+    <div class="note">Performs the operation then calls get_project_structure to verify results.</div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="aaCreatePath" class="half" type="text" placeholder="Folder path to create & assert"/>
+      <button id="btnAACreate" class="btn">Create & Assert</button>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="aaRenameOld" class="half" type="text" placeholder="Old folder path"/>
+      <input id="aaRenameNew" class="half" type="text" placeholder="New folder path"/>
+    </div>
+    <div class="row">
+      <button id="btnAARename" class="btn">Rename & Assert</button>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="aaDeletePath" class="half" type="text" placeholder="Folder path to delete & assert"/>
+      <button id="btnAADelete" class="btn btn-warn">Delete & Assert</button>
+    </div>
+
+    <div id="folderAssertLog" class="code" style="margin-top:8px;max-height:220px;overflow:auto"></div>
+  </section>
+
   <section class="panel" id="logPanel" style="margin-top:16px">
     <h2>Log</h2>
     <div id="log" class="code" style="max-height:220px;overflow:auto"></div>
@@ -533,6 +586,172 @@
       setStatus('renameStatus', e.message || String(e), 'err');
       log('rename_file error:', e.message || e);
     }
+  });
+
+  // Backend tool helpers for folder ops
+  async function beCallTool(tool, args) {
+    const payload = { tool, args };
+    log('beCallTool:', JSON.stringify(payload));
+    const res = await fetch('/api/execute-tool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    log('beCallTool response:', JSON.stringify({ status: res.status, data }));
+    if (!res.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + res.status));
+    return data;
+  }
+
+  async function beGetProjectStructure() {
+    try {
+      const res = await fetch('/api/execute-tool', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: 'get_project_structure', args: {} })
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      return data.structure || data.raw || JSON.stringify(data);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function pathExistsInTree(treeText, path) {
+    if (!treeText) return false;
+    const normalized = String(treeText).replace(/\\\\/g, '/').replace(/\\/g, '/');
+    const check = String(path).replace(/\\\\/g, '/').replace(/\\/g, '/');
+    // Match on path boundaries to reduce false positives
+    const pattern = new RegExp('(^|[\\n\\r\\/])' + check.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '(\\/|\\n|\\r|$)');
+    return pattern.test(normalized);
+  }
+
+  function setBtnBusy(btn, busy) {
+    if (!btn) return;
+    btn.disabled = !!busy;
+    btn.textContent = btn.dataset.label || btn.textContent;
+    if (busy) {
+      if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+      btn.textContent = 'Working...';
+    }
+  }
+
+  // Wire folder create
+  document.getElementById('btnCreateFolder')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    const path = (document.getElementById('createFolderPath').value || '').trim();
+    const statusEl = document.getElementById('createFolderStatus');
+    statusEl.textContent = '';
+    if (!path) { statusEl.textContent = 'Please enter a folder path.'; statusEl.className = 'status err'; return; }
+    try {
+      setBtnBusy(btn, true);
+      await beCallTool('create_folder', { path });
+      statusEl.textContent = 'Folder created'; statusEl.className = 'status ok';
+    } catch (e) {
+      statusEl.textContent = e.message || String(e); statusEl.className = 'status err';
+    } finally {
+      setBtnBusy(btn, false);
+    }
+  });
+
+  // Wire folder rename
+  document.getElementById('btnRenameFolder')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    const oldPath = (document.getElementById('renameFolderOld').value || '').trim();
+    const newPath = (document.getElementById('renameFolderNew').value || '').trim();
+    const statusEl = document.getElementById('renameFolderStatus');
+    statusEl.textContent = '';
+    if (!oldPath || !newPath) { statusEl.textContent = 'Provide old and new folder paths.'; statusEl.className = 'status err'; return; }
+    try {
+      setBtnBusy(btn, true);
+      await beCallTool('rename_folder', { oldPath, newPath });
+      statusEl.textContent = 'Folder renamed'; statusEl.className = 'status ok';
+    } catch (e) {
+      statusEl.textContent = e.message || String(e); statusEl.className = 'status err';
+    } finally {
+      setBtnBusy(btn, false);
+    }
+  });
+
+  // Wire folder delete
+  document.getElementById('btnDeleteFolder')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    const path = (document.getElementById('deleteFolderPath').value || '').trim();
+    const statusEl = document.getElementById('deleteFolderStatus');
+    statusEl.textContent = '';
+    if (!path) { statusEl.textContent = 'Please enter a folder path.'; statusEl.className = 'status err'; return; }
+    if (!confirm('Delete folder and contents?')) { statusEl.textContent = 'Cancelled'; statusEl.className = 'status'; return; }
+    try {
+      setBtnBusy(btn, true);
+      await beCallTool('delete_folder', { path });
+      statusEl.textContent = 'Folder deleted'; statusEl.className = 'status ok';
+    } catch (e) {
+      statusEl.textContent = e.message || String(e); statusEl.className = 'status err';
+    } finally {
+      setBtnBusy(btn, false);
+    }
+  });
+
+  // Auto-assert logs
+  const aaLog = (...args) => {
+    const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    const elOut = document.getElementById('folderAssertLog');
+    const at = new Date().toLocaleTimeString();
+    if (elOut) {
+      elOut.textContent += '[' + at + '] ' + msg + '\\n';
+      elOut.scrollTop = elOut.scrollHeight;
+    }
+    log('[AA]', msg);
+  };
+
+  async function aaCreate(path) {
+    aaLog('Create & Assert start:', path);
+    await beCallTool('create_folder', { path });
+    await new Promise(r => setTimeout(r, 500));
+    const tree = await beGetProjectStructure();
+    const ok = pathExistsInTree(tree, path);
+    aaLog('Create & Assert result:', ok ? 'FOUND (ok)' : 'NOT FOUND');
+  }
+
+  async function aaRename(oldPath, newPath) {
+    aaLog('Rename & Assert start:', oldPath, '->', newPath);
+    await beCallTool('rename_folder', { oldPath, newPath });
+    await new Promise(r => setTimeout(r, 500));
+    const tree = await beGetProjectStructure();
+    const oldExists = pathExistsInTree(tree, oldPath);
+    const newExists = pathExistsInTree(tree, newPath);
+    aaLog('Rename & Assert result:', 'old:', oldExists ? 'STILL FOUND' : 'NOT FOUND (ok)', '; new:', newExists ? 'FOUND (ok)' : 'NOT FOUND');
+  }
+
+  async function aaDelete(path) {
+    aaLog('Delete & Assert start:', path);
+    await beCallTool('delete_folder', { path });
+    await new Promise(r => setTimeout(r, 500));
+    const tree = await beGetProjectStructure();
+    const still = pathExistsInTree(tree, path);
+    aaLog('Delete & Assert result:', still ? 'STILL FOUND (failed)' : 'NOT FOUND (ok)');
+  }
+
+  document.getElementById('btnAACreate')?.addEventListener('click', (ev) => {
+    const p = (document.getElementById('aaCreatePath').value || '').trim();
+    if (!p) { aaLog('auto-create: missing path'); return; }
+    aaCreate(p);
+  });
+  document.getElementById('btnAARename')?.addEventListener('click', (ev) => {
+    const o = (document.getElementById('aaRenameOld').value || '').trim();
+    const n = (document.getElementById('aaRenameNew').value || '').trim();
+    if (!o || !n) { aaLog('auto-rename: missing old/new'); return; }
+    aaRename(o, n);
+  });
+  document.getElementById('btnAADelete')?.addEventListener('click', (ev) => {
+    const p = (document.getElementById('aaDeletePath').value || '').trim();
+    if (!p) { aaLog('auto-delete: missing path'); return; }
+    if (!confirm('Delete folder and contents?')) { aaLog('auto-delete: cancelled'); return; }
+    aaDelete(p);
   });
 
   // Initialize

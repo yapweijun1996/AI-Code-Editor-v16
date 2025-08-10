@@ -90,8 +90,53 @@
     return { status: res.status, ok: res.ok, data };
   }
 
-  // Path utilities with FS Access API
-  async function getHandleForPath(root, path, { createDir } = { createDir: false }) {
+  // Enhanced request helper with detailed logging
+  async function requestWithLogging(name, url, body, targetLog) {
+    const payloadStr = JSON.stringify(body);
+    log(targetLog, `---> ${name}`);
+    log(targetLog, `     Payload: ${payloadStr}`);
+    let res, data, status, ok;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payloadStr
+      });
+      status = `${res.status} ${res.statusText || ''}`.trim();
+      ok = res.ok;
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
+      log(targetLog, `     Response: ${status}`);
+      return { ok, statusCode: res.status, data, raw: res };
+    } catch (err) {
+      log(targetLog, `     Network Error: ${err.message}`);
+    }
+    return { ok: false, statusCode: 0, data: { error: 'network_failure' } };
+  }
+
+  function previewJSON(obj, max = 800) {
+    try {
+      const s = JSON.stringify(obj, null, 2);
+      return s.length > max ? s.slice(0, max) + '…' : s;
+    } catch {
+      return String(obj);
+    }
+  }
+ 
+  // Backend helper: get_project_structure via /api/execute-tool
+  async function beGetProjectStructure(logTarget) {
+    const body = { toolName: 'get_project_structure', parameters: {} };
+    const r = await requestWithLogging('get_project_structure', '/api/execute-tool', body, logTarget || backendLog);
+    // Accept either { structure: '...' } or raw object with text/lines
+    const s = (r.data && (r.data.structure || r.data.text)) || JSON.stringify(r.data || {});
+    return { ok: r.ok, text: String(s || '') };
+  }
+ 
+   // Path utilities with FS Access API
+   async function getHandleForPath(root, path, { createDir } = { createDir: false }) {
     const parts = path.split('/').filter(Boolean);
     let dir = root;
     for (let i=0;i<parts.length-1;i++) {
@@ -161,10 +206,14 @@
     let pass = 0, fail = 0;
     // duckduckgo_search
     try {
-      log(backendLog, 'duckduckgo_search → querying "example domain"');
-      const r = await postJSON('/api/duckduckgo-search', { query: 'example domain' });
-      const hasResults = r.ok && (Array.isArray(r.data.results) ? r.data.results.length>0 : (typeof r.data.html === 'string' ? r.data.html.length>0 : true));
-      if (!r.ok || !hasResults) throw new Error('unexpected response');
+      const body = { query: 'example domain' };
+      const r = await requestWithLogging('duckduckgo_search', '/api/duckduckgo-search', body, backendLog);
+      const hasResults = r.ok && Array.isArray(r.data.results) && r.data.results.length > 0;
+      log(backendLog, '     Assert: results array exists and length > 0');
+      if (!hasResults) {
+        log(backendLog, '     FAIL details: ' + previewJSON(r.data));
+        throw new Error('unexpected response');
+      }
       log(backendLog, 'duckduckgo_search PASS');
       pass++;
     } catch (e) {
@@ -174,10 +223,14 @@
     if (abort) return { pass, fail };
     // read_url
     try {
-      log(backendLog, 'read_url → fetching https://example.com');
-      const r = await postJSON('/api/read-url', { url: 'https://example.com' });
+      const body = { url: 'https://example.com' };
+      const r = await requestWithLogging('read_url', '/api/read-url', body, backendLog);
       const text = (r.data && (r.data.text || r.data.content || '')) || '';
-      if (!r.ok || !/Example Domain/i.test(text)) throw new Error('content check failed');
+      log(backendLog, '     Assert: response contains "Example Domain"');
+      if (!r.ok || !/Example Domain/i.test(text)) {
+        log(backendLog, '     FAIL details: ' + previewJSON(r.data));
+        throw new Error('content check failed');
+      }
       log(backendLog, 'read_url PASS');
       pass++;
     } catch (e) {
@@ -187,10 +240,14 @@
     if (abort) return { pass, fail };
     // run_terminal_command
     try {
-      log(backendLog, 'run_terminal_command → echo AIO_OK');
-      const r = await postJSON('/api/execute-tool', { toolName: 'run_terminal_command', parameters: { command: 'echo AIO_OK' } });
+      const body = { toolName: 'run_terminal_command', parameters: { command: 'echo AIO_OK' } };
+      const r = await requestWithLogging('run_terminal_command', '/api/execute-tool', body, backendLog);
       const out = (r.data && (r.data.stdout || r.data.output || '')) || '';
-      if (!r.ok || !/AIO_OK/.test(out)) throw new Error('output mismatch');
+      log(backendLog, '     Assert: stdout contains "AIO_OK"');
+      if (!r.ok || !/AIO_OK/.test(out)) {
+        log(backendLog, '     FAIL details: ' + previewJSON(r.data));
+        throw new Error('output mismatch');
+      }
       log(backendLog, 'run_terminal_command PASS');
       pass++;
     } catch (e) {
@@ -200,16 +257,85 @@
     if (abort) return { pass, fail };
     // get_file_history
     try {
-      log(backendLog, 'get_file_history → backend/index.js');
-      const r = await postJSON('/api/execute-tool', { toolName: 'get_file_history', parameters: { path: 'backend/index.js' } });
-      const ok = r.ok && r.data;
-      if (!ok) throw new Error('no data');
+      const body = { toolName: 'get_file_history', parameters: { path: 'backend/index.js' } };
+      const r = await requestWithLogging('get_file_history', '/api/execute-tool', body, backendLog);
+      const output = (r.data && (r.data.stdout || r.data.output)) || '';
+      log(backendLog, '     Assert: non-empty git log output');
+      if (!r.ok || !output || !output.trim()) {
+        log(backendLog, '     FAIL details: ' + previewJSON(r.data));
+        throw new Error('no data');
+      }
+      // Show a short preview of first line for context
+      const firstLine = String(output).split('\n')[0] || '';
+      log(backendLog, '     Preview: ' + firstLine.slice(0, 160));
       log(backendLog, 'get_file_history PASS');
       pass++;
     } catch (e) {
       log(backendLog, 'get_file_history FAIL: ' + e.message);
       fail++;
     }
+    if (abort) return { pass, fail };
+
+    // FOLDER OPS (Backend): create_folder, rename_folder, delete_folder with assertions
+    try {
+      const base = 'aio-test-folders';
+      const unique = '.aio-f-' + Date.now();
+      const p1 = base + '/' + unique;
+      const p2 = base + '/' + unique + '-renamed';
+
+      // Ensure base exists (ignore failure)
+      await requestWithLogging('create_folder (base)', '/api/execute-tool',
+        { toolName: 'create_folder', parameters: { path: base } }, backendLog);
+
+      // create_folder p1
+      const rCreate = await requestWithLogging('create_folder', '/api/execute-tool',
+        { toolName: 'create_folder', parameters: { path: p1 } }, backendLog);
+      if (!rCreate.ok) throw new Error('create_folder failed');
+
+      // assert p1 exists
+      const s1 = await beGetProjectStructure(backendLog);
+      log(backendLog, '     Assert: project structure contains ' + p1);
+      if (!s1.ok || !new RegExp('(^|[\\n\\r\\/])' + p1.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '(\\/|\\n|\\r|$)').test(s1.text)) {
+        log(backendLog, '     FAIL details (structure preview): ' + s1.text.slice(0, 240));
+        throw new Error('create assertion failed');
+      }
+
+      // rename_folder p1 -> p2
+      const rRename = await requestWithLogging('rename_folder', '/api/execute-tool',
+        { toolName: 'rename_folder', parameters: { oldPath: p1, newPath: p2 } }, backendLog);
+      if (!rRename.ok) throw new Error('rename_folder failed');
+
+      // assert p1 gone, p2 exists
+      const s2 = await beGetProjectStructure(backendLog);
+      const hasP1 = new RegExp('(^|[\\n\\r\\/])' + p1.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '(\\/|\\n|\\r|$)').test(s2.text);
+      const hasP2 = new RegExp('(^|[\\n\\r\\/])' + p2.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '(\\/|\\n|\\r|$)').test(s2.text);
+      log(backendLog, '     Assert: old not found, new found');
+      if (hasP1 || !hasP2) {
+        log(backendLog, '     FAIL details (structure preview): ' + s2.text.slice(0, 240));
+        throw new Error('rename assertion failed');
+      }
+
+      // delete_folder p2
+      const rDelete = await requestWithLogging('delete_folder', '/api/execute-tool',
+        { toolName: 'delete_folder', parameters: { path: p2 } }, backendLog);
+      if (!rDelete.ok) throw new Error('delete_folder failed');
+
+      // assert p2 gone
+      const s3 = await beGetProjectStructure(backendLog);
+      const stillP2 = new RegExp('(^|[\\n\\r\\/])' + p2.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '(\\/|\\n|\\r|$)').test(s3.text);
+      log(backendLog, '     Assert: deleted path not present');
+      if (stillP2) {
+        log(backendLog, '     FAIL details (structure preview): ' + s3.text.slice(0, 240));
+        throw new Error('delete assertion failed');
+      }
+
+      log(backendLog, 'folder_ops (backend) PASS');
+      pass++;
+    } catch (e) {
+      log(backendLog, 'folder_ops (backend) FAIL: ' + e.message);
+      fail++;
+    }
+
     setStatus(backendStatus, fail ? ('Failed ('+fail+')') : 'Passed', fail ? 'fail' : 'pass');
     return { pass, fail };
   }

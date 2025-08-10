@@ -189,12 +189,100 @@ app.post('/api/duckduckgo-search', async (req, res) => {
 app.post('/api/execute-tool', async (req, res) => {
   const { toolName, parameters } = req.body;
 
-  const validBackendTools = ['run_terminal_command', 'get_file_history'];
+  const validBackendTools = [
+    'run_terminal_command',
+    'get_file_history',
+    // Added filesystem tools
+    'create_folder',
+    'rename_folder',
+    'delete_folder',
+    'get_project_structure'
+  ];
   if (!validBackendTools.includes(toolName)) {
     return res.status(501).json({
       status: 'Error',
       message: `Tool '${toolName}' is not a valid backend tool.`,
     });
+  }
+
+  // Handle filesystem tools directly (no shell execution)
+  const projectRoot = path.join(__dirname, '..');
+  const resolveSafePath = (p) => {
+    const safe = path.normalize(String(p || '')).replace(/^(\.\.[\/\\])+/, '');
+    const full = path.join(projectRoot, safe);
+    if (!full.startsWith(projectRoot)) {
+      throw new Error('Access to paths outside the project directory is forbidden.');
+    }
+    return { safe, full };
+  };
+
+  if (toolName === 'create_folder') {
+    try {
+      const rel = parameters && parameters.path;
+      if (!rel) return res.status(400).json({ status: 'Error', message: "Parameter 'path' is required for create_folder." });
+      const { safe, full } = resolveSafePath(rel);
+      await fs.mkdir(full, { recursive: true });
+      return res.json({ status: 'Success', message: `Folder created: ${safe}` });
+    } catch (e) {
+      return res.status(500).json({ status: 'Error', message: e.message });
+    }
+  }
+
+  if (toolName === 'rename_folder') {
+    try {
+      const oldPath = parameters && parameters.oldPath;
+      const newPath = parameters && parameters.newPath;
+      if (!oldPath || !newPath) {
+        return res.status(400).json({ status: 'Error', message: "Parameters 'oldPath' and 'newPath' are required for rename_folder." });
+      }
+      const { full: oldFull } = resolveSafePath(oldPath);
+      const { full: newFull } = resolveSafePath(newPath);
+      // Ensure target parent exists
+      await fs.mkdir(path.dirname(newFull), { recursive: true });
+      await fs.rename(oldFull, newFull);
+      return res.json({ status: 'Success', message: `Folder renamed to: ${newPath}` });
+    } catch (e) {
+      return res.status(500).json({ status: 'Error', message: e.message });
+    }
+  }
+
+  if (toolName === 'delete_folder') {
+    try {
+      const rel = parameters && parameters.path;
+      if (!rel) return res.status(400).json({ status: 'Error', message: "Parameter 'path' is required for delete_folder." });
+      const { safe, full } = resolveSafePath(rel);
+      // Remove recursively, no error if missing
+      await fs.rm(full, { recursive: true, force: true });
+      return res.json({ status: 'Success', message: `Folder deleted: ${safe}` });
+    } catch (e) {
+      return res.status(500).json({ status: 'Error', message: e.message });
+    }
+  }
+
+  if (toolName === 'get_project_structure') {
+    try {
+      // Build a simple newline-separated list of directories and files (relative to project root)
+      const lines = [];
+      async function walk(dir, relPrefix = '') {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          // Skip node_modules or hidden artifacts if desired (keep all for now)
+          const relPath = relPrefix ? path.join(relPrefix, entry.name) : entry.name;
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            lines.push(relPath + '/');
+            await walk(fullPath, relPath);
+          } else {
+            lines.push(relPath);
+          }
+        }
+      }
+      await walk(projectRoot, '');
+      const structure = lines.join('\n');
+      return res.json({ status: 'Success', structure });
+    } catch (e) {
+      return res.status(500).json({ status: 'Error', message: e.message });
+    }
   }
 
   let command;
