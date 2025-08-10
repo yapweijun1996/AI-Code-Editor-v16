@@ -18,67 +18,16 @@ export class LLMServiceFactory {
         }
         
         switch (provider) {
-            case 'gemini': {
-                const providerConfig = {
-                    temperature: settings.gemini?.temperature,
-                    topP: settings.gemini?.topP,
-                    maxTokens: settings.gemini?.maxOutputTokens,
-                    enableTools: settings.gemini?.enableTools !== false
-                };
-                return new GeminiService(
-                    settings.apiKeyManager,
-                    settings.gemini?.model,
-                    providerConfig,
-                    settings.common || {}
-                );
-            }
-            case 'openai': {
-                const providerConfig = {
-                    temperature: settings.openai?.temperature,
-                    topP: settings.openai?.topP,
-                    maxTokens: settings.openai?.maxTokens,
-                    toolCallMode: settings.openai?.toolCallMode || 'auto',
-                    enableTools: settings.openai?.enableTools !== false
-                };
-                return new OpenAIService(
-                    settings.apiKeyManager,
-                    settings.openai?.model,
-                    providerConfig,
-                    settings.common || {}
-                );
-            }
-            case 'ollama': {
-                const customConfig = { baseURL: settings.ollama?.baseURL };
-                const providerConfig = {
-                    temperature: settings.ollama?.temperature,
-                    topP: settings.ollama?.topP,
-                    maxTokens: settings.ollama?.maxTokens,
-                    enableTools: settings.ollama?.enableTools === true
-                };
-                return new OllamaService(
-                    settings.apiKeyManager,
-                    settings.ollama?.model,
-                    customConfig,
-                    providerConfig,
-                    settings.common || {}
-                );
-            }
-            default: {
+            case 'gemini':
+                return new GeminiService(settings.apiKeyManager, settings.gemini?.model);
+            case 'openai':
+                return new OpenAIService(settings.apiKeyManager, settings.openai?.model);
+            case 'ollama':
+                return new OllamaService(settings.apiKeyManager, settings.ollama?.model, { baseURL: settings.ollama?.baseURL });
+            default:
                 // Fallback to Gemini if no provider is selected or the provider is unknown
                 console.warn(`Unknown or unset LLM provider: '${provider}'. Falling back to Gemini.`);
-                const providerConfig = {
-                    temperature: settings.gemini?.temperature,
-                    topP: settings.gemini?.topP,
-                    maxTokens: settings.gemini?.maxOutputTokens,
-                    enableTools: settings.gemini?.enableTools !== false
-                };
-                return new GeminiService(
-                    settings.apiKeyManager,
-                    settings.gemini?.model,
-                    providerConfig,
-                    settings.common || {}
-                );
-            }
+                return new GeminiService(settings.apiKeyManager, settings.gemini?.model);
         }
     }
 }

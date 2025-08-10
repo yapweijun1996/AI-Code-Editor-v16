@@ -72,19 +72,12 @@
           </div>
           <div class="header-toolbar">
             <button id="settings-toggle-button" title="Toggle Settings">⚙️</button>
-            <label class="toolbar-group" title="Enable LLM debug and health panel">
-              <input type="checkbox" id="debug-llm-toggle" />
-              Debug
-            </label>
             <div class="toolbar-group" id="token-usage-display" style="display: flex;">
-              <span id="token-request">Req: 0</span>
-              <span id="token-response">Res: 0</span>
-              <span id="token-total">Total: 0</span>
+              <span id="token-request">Req: 3333</span>
+              <span id="token-response">Res: 2241</span>
+              <span id="token-total">Total: 5574</span>
             </div>
           </div>
-        </div>
-        <div id="llm-health-panel" class="llm-health-panel" style="display: none;">
-          <pre id="llm-health-json" style="margin:0;"></pre>
         </div>
         <div id="chat-messages"></div>
         <div id="chat-input-container">
@@ -174,11 +167,14 @@
                 <div class="form-group">
                     <label for="openai-model-selector">Model</label>
                     <select id="openai-model-selector" class="model-selector">
-                        <option value="gpt-5-mini">GPT-5-mini</option>
-                        <option value="gpt-5">GPT-5</option>
-                        <option value="o4-mini">o4-mini</option>
                         <option value="gpt-4.1">GPT-4.1</option>
                         <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+                        <option value="gpt-4o">GPT-4o</option>
+                        <option value="gpt-4o-mini">GPT-4o Mini</option>
+                        <option value="o1-preview">o1-preview</option>
+                        <option value="o1-mini">o1-mini</option>
+                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                        <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
                     </select>
                 </div>
             </div>

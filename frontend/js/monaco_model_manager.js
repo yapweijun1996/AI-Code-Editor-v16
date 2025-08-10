@@ -82,7 +82,7 @@ export class MonacoModelManager {
             throw new Error('Monaco editor is not available. Ensure it is loaded before creating models.');
         }
 
-        const uri = filename ? monaco.Uri.file(filename) : undefined;
+        const uri = filename ? monaco.Uri.parse(`file://${filename}`) : undefined;
         let model;
 
         try {

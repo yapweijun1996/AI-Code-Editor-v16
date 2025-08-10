@@ -1,13 +1,11 @@
 import { BaseLLMService } from './base_llm_service.js';
-import { ToolAdapter } from './tool_adapter.js';
 
 /**
  * Concrete implementation for the OpenAI API.
  */
 export class OpenAIService extends BaseLLMService {
-    constructor(apiKeyManager, model, providerConfig = {}, options = {}) {
-        super(apiKeyManager, model, options);
-        this.updateConfig(providerConfig);
+    constructor(apiKeyManager, model) {
+        super(apiKeyManager, model);
         this.apiBaseUrl = 'https://api.openai.com/v1';
     }
 
@@ -17,95 +15,46 @@ export class OpenAIService extends BaseLLMService {
         return !!currentApiKey;
     }
 
-    async *_sendMessageStreamImpl(history, toolDefinition, customRules, abortSignal = null) {
+    async *sendMessageStream(history, tools, customRules, options = {}) {
         await this.apiKeyManager.loadKeys('openai');
         const currentApiKey = this.apiKeyManager.getCurrentKey();
         if (!currentApiKey) {
             throw new Error("OpenAI API key is not set or available.");
         }
 
-        const messages = this._prepareMessages(history, customRules);
-        const toolDecl = ToolAdapter.toProviderDeclarations(this.getProviderKey(), toolDefinition);
-        const enableTools = this.providerConfig?.enableTools !== false;
-        const hasTools = enableTools && (Array.isArray(toolDecl) ? toolDecl.length > 0 : !!toolDecl);
-        const tools = hasTools ? toolDecl : undefined;
-        const tool_choice = hasTools ? (this.providerConfig?.toolCallMode || 'auto') : undefined;
+        const messages = this._prepareMessages(history, customRules, options);
+        const toolDefinitions = this._prepareTools(tools);
 
         const controller = new AbortController();
-        const abortHandler = () => controller.abort();
-        const timeoutMs = this.options?.timeout ?? 300000;
-        const timeoutId = setTimeout(() => controller.abort(), timeoutMs); // configurable timeout
-        if (abortSignal) {
-            if (abortSignal.aborted) {
-                clearTimeout(timeoutId);
-                throw new Error('Request aborted');
-            }
-            abortSignal.addEventListener('abort', abortHandler, { once: true });
-        }
+        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
 
-        let response;
-        try {
-            response = await fetch(`${this.apiBaseUrl}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${currentApiKey}`
-                },
-                body: JSON.stringify((() => {
-                    const payload = {
-                        model: this.model,
-                        messages,
-                        stream: true
-                    };
-                    // Optional generation params only when explicitly set
-                    const __modelName = String(this.model || '');
-                    const __isReasoning = /^o/i.test(__modelName) || /reasoning/i.test(__modelName);
-                    // By default, omit sampling params for maximum compatibility with modern models.
-                    // Advanced users can opt-in via providerConfig.forceSampling = true (non-reasoning models only).
-                    const __allowSampling = this.providerConfig?.forceSampling === true && !__isReasoning;
-                    if (__allowSampling) {
-                        if (typeof this.providerConfig?.temperature === 'number') payload.temperature = this.providerConfig.temperature;
-                        if (typeof this.providerConfig?.topP === 'number') payload.top_p = this.providerConfig.topP;
-                    }
-                    if (typeof this.providerConfig?.maxTokens === 'number') {
-                        // Use the modern Chat Completions parameter to avoid 400s on newer models
-                        payload.max_completion_tokens = this.providerConfig.maxTokens;
-                    }
-                    // Only include tool_choice if tools are present to avoid OpenAI 400 errors
-                    if (tools) {
-                        payload.tools = tools;
-                        payload.tool_choice = tool_choice;
-                    }
-                    return payload;
-                })()),
-                signal: controller.signal,
-            });
-        } finally {
-            clearTimeout(timeoutId);
-            if (abortSignal) {
-                abortSignal.removeEventListener('abort', abortHandler);
-            }
-        }
+        const response = await fetch(`${this.apiBaseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${currentApiKey}`
+            },
+            body: JSON.stringify({
+                model: this.model,
+                messages: messages,
+                tools: toolDefinitions,
+                tool_choice: "auto",
+                stream: true,
+            }),
+            signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
-            let errorMessage = 'OpenAI API Error';
-            try {
-                const errorData = await response.json();
-                errorMessage = `OpenAI API Error: ${errorData?.error?.message || response.statusText}`;
-            } catch (_) {
-                // ignore JSON parse error
-                errorMessage = `OpenAI API Error: ${response.status} ${response.statusText}`;
-            }
-            throw new Error(errorMessage);
+            const errorData = await response.json();
+            throw new Error(`OpenAI API Error: ${errorData.error.message}`);
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         let currentToolCalls = {}; // State to aggregate tool call chunks
-        // Accumulate content and normalized usage across the entire stream
-        let accumulatedText = '';
-        let finalUsage = null;
 
         while (true) {
             const { done, value } = await reader.read();
@@ -119,15 +68,16 @@ export class OpenAIService extends BaseLLMService {
                 if (line.startsWith('data: ')) {
                     const data = line.substring(6);
                     if (data === '[DONE]') {
+                        // Don't return immediately. The final chunk with usage stats might still be processed.
+                        // The loop will terminate naturally when reader.read() is done.
                         continue;
                     }
                     try {
                         const json = JSON.parse(data);
-                        const delta = json.choices?.[0]?.delta || {};
+                        const delta = json.choices[0].delta;
 
                         if (delta.content) {
                             yield { text: delta.content, functionCalls: null };
-                            accumulatedText += delta.content;
                         }
                         
                         if (delta.tool_calls) {
@@ -135,19 +85,7 @@ export class OpenAIService extends BaseLLMService {
                         }
                         
                         if (json.usage) {
-                            try {
-                                const pt = (json.usage.prompt_tokens ?? json.usage.input_tokens ?? 0);
-                                const ct = (json.usage.completion_tokens ?? json.usage.output_tokens ??
-                                    ((json.usage.total_tokens && (json.usage.prompt_tokens ?? json.usage.input_tokens))
-                                        ? (json.usage.total_tokens - (json.usage.prompt_tokens ?? json.usage.input_tokens))
-                                        : 0));
-                                finalUsage = {
-                                    promptTokenCount: pt,
-                                    candidatesTokenCount: ct
-                                };
-                            } catch (_) {
-                                // ignore malformed usage payloads
-                            }
+                             console.log('[OpenAI Service] Received usage data (but it will not be used):', json.usage);
                         }
 
                     } catch (e) {
@@ -162,50 +100,21 @@ export class OpenAIService extends BaseLLMService {
             }
         }
         
-         // After loop: compute or emit normalized usage metadata
-         try {
-             if (!finalUsage) {
-                 // Fallback estimation using tokenizer if available
-                 let estPrompt = 0;
-                 let estResponse = 0;
-                 if (typeof GPTTokenizer_cl100k_base !== 'undefined') {
-                     const { encode } = GPTTokenizer_cl100k_base;
-                     const promptText = (messages || []).map(m => (m.content || '')).join('\n');
-                     estPrompt = encode(promptText).length;
-                     estResponse = encode(accumulatedText).length;
-                 }
-                 finalUsage = {
-                     promptTokenCount: estPrompt,
-                     candidatesTokenCount: estResponse
-                 };
-             }
-             // Emit a final usage chunk to normalize across providers
-             yield { text: '', functionCalls: null, usageMetadata: finalUsage };
-         } catch (_) {
-             // non-fatal
-         }
-         
-         // Successful completion handled by BaseLLMService KeyRotation policy (no provider-level rotation)
-     }
-
-    _prepareMessages(history, customRules) {
-        // Extract system prompt from incoming history (added by PromptBuilder in Chat layer)
-        const systemPrompt = this._extractSystemPrompt(history, customRules);
-        const messages = [];
-
-        if (systemPrompt && systemPrompt.trim()) {
-            messages.push({ role: 'system', content: systemPrompt });
+        // After the loop, process any remaining data in the buffer which might contain the final usage stats
+        if (buffer) {
+            // Buffer might contain final JSON with usage, but we are ignoring it.
         }
+    }
+
+    _prepareMessages(history, customRules, options = {}) {
+        const mode = document.getElementById('agent-mode-selector')?.value || 'code';
+        const systemPrompt = this._getSystemPrompt(mode, customRules, options);
+        const messages = [{ role: 'system', content: systemPrompt }];
 
         // Track tool calls to ensure proper pairing
         const pendingToolCalls = new Map();
 
         for (const turn of history) {
-            if (turn.role === 'system') {
-                // Already captured via systemPrompt above; skip additional system turns
-                continue;
-            }
-
             if (turn.role === 'user') {
                 const toolResponses = turn.parts.filter(p => p.functionResponse);
                 if (toolResponses.length > 0) {
@@ -216,6 +125,7 @@ export class OpenAIService extends BaseLLMService {
                             messages.push({
                                 role: 'tool',
                                 tool_call_id: toolCallId,
+                                name: responsePart.functionResponse.name,
                                 content: JSON.stringify(responsePart.functionResponse.response),
                             });
                             pendingToolCalls.delete(toolCallId);
@@ -223,7 +133,7 @@ export class OpenAIService extends BaseLLMService {
                     });
                 } else {
                     const userContent = turn.parts.map(p => p.text).join('\n');
-                    if (userContent && userContent.trim()) {
+                    if (userContent.trim()) {
                         messages.push({ role: 'user', content: userContent });
                     }
                 }
@@ -251,7 +161,7 @@ export class OpenAIService extends BaseLLMService {
                     });
                 } else {
                     const modelContent = turn.parts.filter(p => p.text).map(p => p.text).join('\n');
-                    if (modelContent && modelContent.trim()) {
+                    if (modelContent.trim()) {
                         messages.push({ role: 'assistant', content: modelContent });
                     }
                 }
@@ -285,23 +195,6 @@ export class OpenAIService extends BaseLLMService {
         }
 
         return cleanedMessages;
-    }
-
-    _extractSystemPrompt(history, customRules) {
-        const sysTurn = history.find(t => t.role === 'system');
-        let text = '';
-        if (sysTurn && Array.isArray(sysTurn.parts)) {
-            text = sysTurn.parts.map(p => p.text).filter(Boolean).join('\n');
-        }
-        if (!text) {
-            // Fallback to legacy generator if no system prompt present
-            try {
-                text = this._getSystemPrompt('code', customRules, {});
-            } catch (_) {
-                text = customRules || '';
-            }
-        }
-        return text;
     }
 
     _getSystemPrompt(mode, customRules, options = {}) {
@@ -482,7 +375,43 @@ Current context:
         return systemPrompt;
     }
 
-    // Tool conversion handled by ToolAdapter.toProviderDeclarations()
+    _convertGeminiParamsToOpenAI(params) {
+        const convert = (prop) => {
+            if (typeof prop !== 'object' || prop === null || !prop.type) {
+                return prop;
+            }
+
+            const newProp = { ...prop, type: prop.type.toLowerCase() };
+
+            if (newProp.type === 'object' && newProp.properties) {
+                const newProperties = {};
+                for (const key in newProp.properties) {
+                    newProperties[key] = convert(newProp.properties[key]);
+                }
+                newProp.properties = newProperties;
+            }
+
+            if (newProp.type === 'array' && newProp.items) {
+                newProp.items = convert(newProp.items);
+            }
+
+            return newProp;
+        };
+
+        return convert(params);
+    }
+
+    _prepareTools(geminiTools) {
+        if (!geminiTools || !geminiTools.functionDeclarations) return [];
+        return geminiTools.functionDeclarations.map(tool => ({
+            type: 'function',
+            function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: this._convertGeminiParamsToOpenAI(tool.parameters),
+            }
+        }));
+    }
     _aggregateToolCalls(chunks, state) {
         chunks.forEach(chunk => {
             const { index, id, function: { name, arguments: args } } = chunk;
@@ -513,25 +442,5 @@ Current context:
             }
         }
         return completeCalls;
-    }
-
-    // Provider metadata and key
-    getProviderKey() {
-        return 'openai';
-    }
-
-    getCapabilities() {
-        return {
-            provider: 'openai',
-            supportsFunctionCalling: true,
-            supportsSystemInstruction: true,
-            nativeToolProtocol: 'openai_tools',
-            maxContext: 128000,
-            maxTokens: this.providerConfig?.maxTokens ?? 4096,
-            rateLimits: {
-                requestsPerMinute: this.options?.rateLimit?.requestsPerMinute ?? 3000,
-                tokensPerMinute: this.options?.rateLimit?.tokensPerMinute ?? null
-            }
-        };
     }
 }

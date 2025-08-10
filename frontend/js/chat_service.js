@@ -11,19 +11,11 @@ import { providerOptimizer } from './provider_optimizer.js';
 import { taskManager } from './task_manager.js';
 import { contextAnalyzer } from './context_analyzer.js';
 import { contextBuilder } from './context_builder.js';
-import { PromptBuilder } from './llm/prompt_builder.js';
-import { ToolAdapter } from './llm/tool_adapter.js';
-import { LLMFacade } from './llm/llm_facade.js';
-import { IntentClassifier } from './llm/intent_classifier.js';
-import { TaskOrchestrator } from './llm/task_orchestrator.js';
-import { RetryPolicy } from './llm/retry_policy.js';
 
 export const ChatService = {
     isSending: false,
     isCancelled: false,
-    currentAbortController: null,
     llmService: null,
-    llmFacade: null,
     rootDirectoryHandle: null,
     activePlan: null,
     errorTracker: {
@@ -48,37 +40,10 @@ export const ChatService = {
     async _initializeLLMService() {
         const llmSettings = Settings.getLLMSettings();
         this.llmService = LLMServiceFactory.create(llmSettings.provider, llmSettings);
-        this.llmFacade = new LLMFacade(this.llmService, llmSettings);
         
         // Initialize provider-specific optimizations
         this.currentProvider = llmSettings.provider;
         console.log(`LLM Service initialized with provider: ${llmSettings.provider}`);
-        
-        // Sync provider capabilities with providerOptimizer (temporary alignment)
-        try {
-            if (this.llmFacade?.getCapabilities || this.llmService?.getCapabilities) {
-                const caps = this.llmFacade?.getCapabilities ? this.llmFacade.getCapabilities() : this.llmService.getCapabilities();
-                const providerKey = caps?.provider || this.currentProvider;
-                const existing = providerOptimizer.providerLimits[providerKey] || {};
-                // Map BaseLLMService capabilities into providerOptimizer schema
-                providerOptimizer.providerLimits[providerKey] = {
-                    ...existing,
-                    maxTokens: caps?.maxTokens ?? existing.maxTokens,
-                    contextWindow: caps?.maxContext ?? existing.contextWindow,
-                    // Heuristic mapping: function-calling implies structured outputs support
-                    supportsStructuredOutput: (typeof caps?.supportsFunctionCalling === 'boolean')
-                        ? caps.supportsFunctionCalling
-                        : existing.supportsStructuredOutput,
-                    // Preserve existing flag when capability not present
-                    supportsVision: existing.supportsVision ?? false,
-                    // Align request-per-minute if provided
-                    rateLimit: caps?.rateLimits?.requestsPerMinute ?? existing.rateLimit
-                };
-                console.log('[Capabilities Sync]', providerKey, providerOptimizer.providerLimits[providerKey]);
-            }
-        } catch (e) {
-            console.warn('[Capabilities Sync] Failed to align capabilities with providerOptimizer:', e);
-        }
         
         // Set up performance monitoring
         performanceOptimizer.startTimer('llm_initialization');
@@ -280,9 +245,7 @@ export const ChatService = {
     },
 
     async _performApiCall(history, chatMessages, options = {}) {
-        const { singleTurn = false, useTools = true, directAnalysis = false, overrideMode = null, promptContext = null } = options;
-        const controller = new AbortController();
-        this.currentAbortController = controller;
+        const { singleTurn = false, useTools = true, directAnalysis = false } = options;
 
         if (!this.llmService) {
             UI.showError("LLM Service is not initialized. Please check your settings.");
@@ -293,7 +256,6 @@ export const ChatService = {
         let continueLoop = true;
         let totalRequestTokens = 0;
         let totalResponseTokens = 0;
-        let usageSeen = false;
 
         // Estimate request tokens
         if (typeof GPTTokenizer_cl100k_base !== 'undefined') {
@@ -305,49 +267,13 @@ export const ChatService = {
         while (continueLoop && !this.isCancelled) {
             try {
                 UI.showThinkingIndicator(chatMessages, 'AI is thinking...');
-                const mode = overrideMode || document.getElementById('agent-mode-selector').value;
+                const mode = document.getElementById('agent-mode-selector').value;
                 const customRules = Settings.get(`custom.${mode}.rules`);
-
-                // PromptContext wiring: prefer provided, else derive from active task ("goal memory")
-                let effectivePromptContext = promptContext || null;
-                if (!effectivePromptContext) {
-                    try {
-                        const activeTaskId = taskManager.activeTask || null;
-                        if (activeTaskId) {
-                            effectivePromptContext = taskManager.buildPromptContext(activeTaskId, {
-                                tools_context: mode
-                            });
-                        } else {
-                            // Heuristic: if there's exactly one in-progress task, use it
-                            const tasks = Array.from(taskManager.tasks.values());
-                            const inProg = tasks.find(t => t.status === 'in_progress');
-                            if (inProg) {
-                                effectivePromptContext = taskManager.buildPromptContext(inProg.id, { tools_context: mode });
-                            }
-                        }
-                    } catch (e) {
-                        console.warn('[ChatService] Failed to build prompt context from task manager:', e);
-                    }
-                }
-                // Minimal debug: confirm prompt context slots when present
-                try {
-                    if (effectivePromptContext?.slots) {
-                        const s = effectivePromptContext.slots;
-                        console.log('[PromptContext] slots prepared:', {
-                            hasTaskSummary: !!s.task_summary,
-                            hasPlanOutline: !!s.plan_outline,
-                            planOutlineHash: s.plan_outline_hash || null,
-                            currentFocus: s.current_focus || null
-                        });
-                    }
-                } catch (_) {}
                 
                 // Enhanced tool definitions with smart recommendations
-                const caps = this.llmService.getCapabilities ? this.llmService.getCapabilities() : {};
-                const providerSupportsTools = caps.supportsFunctionCalling !== false;
-                let tools = (useTools && providerSupportsTools) ? ToolExecutor.getToolDefinitions() : [];
+                let tools = useTools ? ToolExecutor.getToolDefinitions() : [];
                 
-                if (useTools && providerSupportsTools) {
+                if (useTools) {
                     // Optimize tool selection for amend mode
                     if (mode === 'amend') {
                         const amendOptimizedTools = tools.functionDeclarations.map(tool => {
@@ -366,37 +292,11 @@ export const ChatService = {
                     }
                 }
                 
-                let stream;
-                if (this.llmFacade) {
-                    stream = this.llmFacade.sendMessageStream(history, tools, mode, customRules, controller.signal, effectivePromptContext);
-                } else {
-                    const promptPack = PromptBuilder.build(mode, customRules, effectivePromptContext || {});
-                    const systemTurn = { role: 'system', parts: [{ text: promptPack.systemPrompt }] };
-                    const effectiveHistory = [systemTurn, ...history];
-                    stream = this.llmService.sendMessageStream(effectiveHistory, tools, customRules, controller.signal);
-                }
+                const stream = this.llmService.sendMessageStream(history, tools, customRules, { directAnalysis });
 
                 let modelResponseText = '';
                 let displayText = '';
                 functionCalls = []; // Reset for this iteration
-                // Throttled UI streaming to reduce DOM writes
-                let bufferedDelta = '';
-                let lastFlushTs = 0;
-                const FLUSH_INTERVAL_MS = 50;
-                const flushUI = (force = false) => {
-                    const nowTs = performance.now();
-                    if (!force && (nowTs - lastFlushTs) < FLUSH_INTERVAL_MS) return;
-                    if (bufferedDelta.length === 0) return;
-                    displayText += bufferedDelta;
-                    bufferedDelta = '';
-                    UI.appendMessage(chatMessages, displayText, 'ai', true);
-                    lastFlushTs = nowTs;
-                };
-                // Lightweight perf metrics for verification
-                const reqStartTs = performance.now();
-                let firstTokenTs = null;
-                let chunksCount = 0;
-                let bytesCount = 0;
 
                 for await (const chunk of stream) {
                     if (this.isCancelled) return;
@@ -404,77 +304,23 @@ export const ChatService = {
                     if (chunk.text) {
                         const text = chunk.text;
                         modelResponseText += text;
-                        bufferedDelta += text;
-                        if (!firstTokenTs) firstTokenTs = performance.now();
-                        chunksCount++;
-                        bytesCount += text.length;
-                        flushUI();
+                        displayText += text;
+                        UI.appendMessage(chatMessages, displayText, 'ai', true);
                     }
                     if (chunk.functionCalls) {
-                        const providerKey =
-                            caps.provider ||
-                            (this.llmService.getCapabilities ? this.llmService.getCapabilities().provider : null) ||
-                            this.currentProvider ||
-                            this.llmService.constructor.name.replace('Service', '').toLowerCase();
-                        const normalizedCalls = ToolAdapter.fromProviderCalls(providerKey, chunk.functionCalls);
-                        if (normalizedCalls && normalizedCalls.length > 0) {
-                            functionCalls.push(...normalizedCalls);
-                        }
+                        functionCalls.push(...chunk.functionCalls);
                     }
                     if (chunk.usageMetadata) {
-                        // Normalized usage across providers:
-                        // - promptTokenCount: absolute (max across chunks)
-                        // - candidatesTokenCount: absolute (max across chunks)
-                        usageSeen = true;
-                        const pt = Number(chunk.usageMetadata.promptTokenCount || 0);
-                        const ct = Number(chunk.usageMetadata.candidatesTokenCount || 0);
-                        totalRequestTokens = Math.max(totalRequestTokens || 0, pt);
-                        totalResponseTokens = Math.max(totalResponseTokens || 0, ct);
+                        // This is for Gemini, which provides accurate counts
+                        totalRequestTokens = chunk.usageMetadata.promptTokenCount || 0;
+                        totalResponseTokens += chunk.usageMetadata.candidatesTokenCount || 0;
                     }
                 }
 
-                // ensure final UI flush after stream completes
-                flushUI(true);
-                
-                // ensure final UI flush after stream completes
-                flushUI(true);
-
-                // Derive simple perf metrics for this request
-                const totalMs = performance.now() - reqStartTs;
-                const ttfbMs = firstTokenTs ? (firstTokenTs - reqStartTs) : totalMs;
-                const tokensPerSec = totalResponseTokens > 0 ? (totalResponseTokens / (totalMs / 1000)) : 0;
-
-                this.lastRequestMetrics = {
-                    provider: this.currentProvider || (this.llmService?.constructor?.name || '').replace('Service', '').toLowerCase(),
-                    ttfbMs: Math.round(ttfbMs),
-                    totalMs: Math.round(totalMs),
-                    chunks: chunksCount,
-                    bytes: bytesCount,
-                    requestTokens: Number(totalRequestTokens || 0),
-                    responseTokens: Number(totalResponseTokens || 0),
-                    tokensPerSec: Number(tokensPerSec.toFixed(2))
-                };
-
-                if (Settings.get('llm.common.debugLLM')) {
-                    UI.appendMessage(
-                        chatMessages,
-                        `⏱️ TTFB: ${Math.round(ttfbMs)}ms • Total: ${Math.round(totalMs)}ms • Chunks: ${chunksCount} • RespTokens: ${totalResponseTokens} • Thruput: ${this.lastRequestMetrics.tokensPerSec} tok/s`,
-                        'ai-muted'
-                    );
-                    try { console.info('[LLM Perf]', this.lastRequestMetrics); } catch (_) {}
-                }
-                
-                // If no provider usage was reported, estimate tokens as a fallback
-                if (!usageSeen && typeof GPTTokenizer_cl100k_base !== 'undefined') {
-                    try {
-                        const { encode } = GPTTokenizer_cl100k_base;
-                        // totalRequestTokens already estimated from input history earlier; ensure it's numeric
-                        totalRequestTokens = Number(totalRequestTokens || 0);
-                        // Estimate response tokens from streamed text
-                        totalResponseTokens = Number(encode(modelResponseText).length || 0);
-                    } catch (_) {
-                        // Leave totals as-is if tokenizer not available or estimation fails
-                    }
+                // For OpenAI, estimate response tokens
+                if (typeof GPTTokenizer_cl100k_base !== 'undefined' && this.llmService.constructor.name === 'OpenAIService') {
+                    const { encode } = GPTTokenizer_cl100k_base;
+                    totalResponseTokens = encode(modelResponseText).length;
                 }
                 
                 console.log(`[Token Usage] Final totals - Req: ${totalRequestTokens}, Res: ${totalResponseTokens}`);
@@ -494,63 +340,20 @@ export const ChatService = {
                 if (functionCalls.length > 0) {
                     // Execute all tools sequentially for all providers
                     const toolResults = [];
-                    let toolExecutionFailed = false;
                     for (const call of functionCalls) {
                         if (this.isCancelled) return;
                         console.log(`Executing tool: ${call.name} sequentially...`);
                         UI.showThinkingIndicator(chatMessages, `Executing tool: ${call.name}...`);
-                        const retryOptions = { maxAttempts: 3, baseDelayMs: 800, maxDelayMs: 8000, multiplier: 2, jitter: 'equal' };
-                        let execResult;
-                        try {
-                            execResult = await RetryPolicy.execute(async (attempt) => {
-                                const res = await ToolExecutor.execute(call, this.rootDirectoryHandle);
-                                // The retry policy should throw an error on failure to trigger retries.
-                                // We check for explicit failure from the standardized tool response.
-                                if (!res.success) {
-                                    const errorMessage = res?.toolResponse?.response?.error || `Tool ${call.name} failed without a specific error message.`;
-                                    throw new Error(errorMessage);
-                                }
-                                return res;
-                            }, 'tool', retryOptions, ({ attempt }) => {
-                                if (attempt > 1) {
-                                    UI.appendMessage(chatMessages, `Retrying ${call.name} (attempt ${attempt}/${retryOptions.maxAttempts})...`, 'ai-muted');
-                                }
-                            });
-                        } catch (e) {
-                            execResult = {
-                                toolResponse: {
-                                    name: call.name,
-                                    response: { error: e.message }
-                                },
-                                success: false // Explicitly mark as failure
-                            };
-                            UI.appendMessage(chatMessages, `Tool ${call.name} failed after retries: ${e.message}`, 'ai-muted');
-                        }
-
+                        const result = await ToolExecutor.execute(call, this.rootDirectoryHandle);
                         toolResults.push({
                             id: call.id,
-                            name: execResult.toolResponse.name,
-                            response: execResult.toolResponse.response,
+                            name: result.toolResponse.name,
+                            response: result.toolResponse.response,
                         });
-
-                        // ** FAIL-FAST LOGIC **
-                        // If the tool execution was not successful, stop the entire tool-calling loop.
-                        if (!execResult.success) {
-                            console.error(`[Fail-Fast] Halting tool execution due to failure in '${call.name}'.`);
-                            UI.showError(`Execution stopped: Tool '${call.name}' failed.`);
-                            toolExecutionFailed = true;
-                            break; // Exit the for-loop
-                        }
                     }
-
-                    // Always push the results so far, even if a failure occurred,
-                    // so the model has context on what succeeded before the failure.
                     history.push({ role: 'user', parts: toolResults.map(functionResponse => ({ functionResponse })) });
-
-                    // If a tool failed, we stop the conversation loop.
-                    if (toolExecutionFailed) {
-                        continueLoop = false;
-                    } else if (singleTurn) {
+                    
+                    if (singleTurn) {
                         continueLoop = false;
                     } else {
                         // For OpenAI: Continue the loop to get AI's next response
@@ -575,9 +378,6 @@ export const ChatService = {
             }
         }
 
-        // Reset abort controller reference
-        this.currentAbortController = null;
-
         // Only save to DB if it's not part of an autonomous plan
         if (!this.activePlan) {
             await DbManager.saveChatHistory(history);
@@ -596,30 +396,17 @@ export const ChatService = {
             }
 
             const history = options.history || [];
-
-            // Decide tool availability based on provider capabilities
-            const caps = this.llmService.getCapabilities ? this.llmService.getCapabilities() : {};
-            const providerSupportsTools = caps.supportsFunctionCalling !== false;
-            const tools = options.tools ? options.tools : (providerSupportsTools ? ToolExecutor.getToolDefinitions() : []);
+            const tools = options.tools || ToolExecutor.getToolDefinitions();
             const customRules = options.customRules || '';
 
-            const mode = options.mode || document.getElementById('agent-mode-selector')?.value || 'code';
-            const abortSignal = options.abortSignal || null;
-            // Build message history without system; Facade will ensure system turn
+            // Create a simple message history
             const messageHistory = [...history, {
                 role: 'user',
                 parts: [{ text: prompt }]
             }];
 
             let fullResponse = '';
-            const streamGenerator = this.llmFacade
-                ? this.llmFacade.sendMessageStream(messageHistory, tools, mode, customRules, abortSignal, options.promptContext || null)
-                : this.llmService.sendMessageStream(
-                    [{ role: 'system', parts: [{ text: PromptBuilder.build(mode, customRules, options.promptContext || {}).systemPrompt }] }, ...messageHistory],
-                    tools,
-                    customRules,
-                    abortSignal
-                  );
+            const streamGenerator = this.llmService.sendMessageStream(messageHistory, tools, customRules);
             
             for await (const chunk of streamGenerator) {
                 if (chunk.text) {
@@ -690,50 +477,44 @@ export const ChatService = {
 
     /**
      * Asks the AI to classify the user's intent to determine the correct handling logic.
-     * Delegates to IntentClassifier (single-turn, no tools) via LLMFacade.
      * @param {string} userPrompt - The user's message.
      * @param {string} conversationContext - Recent conversation history.
      * @returns {Promise<string>} The AI's classification (DIRECT, TASK, or TOOL).
      */
     async _classifyMessageIntent(userPrompt, conversationContext = '') {
-        const history = this.currentHistory || await DbManager.getChatHistory();
-        // Ensure we have a facade (created in _initializeLLMService)
-        const facade = this.llmFacade || new LLMFacade(this.llmService, Settings.getLLMSettings());
+        const classificationPrompt = `
+Analyze the user's message and classify its primary intent into ONE of the following categories.
 
-        // Prefer multi-intent classification to robustly route complex prompts
-        try {
-            if (IntentClassifier.classifyMulti) {
-                const multi = await IntentClassifier.classifyMulti({
-                    llmFacade: facade,
-                    userPrompt,
-                    conversationContext,
-                    history
-                });
+**Conversation Context:**
+${conversationContext}
 
-                const labels = (multi?.intents || []).map(i => i.label);
-                const strongTaskSignals = ['setup_tailwind','create_js_files','modify_files','bug_fix','refactor','write_tests'];
-                const hasStrongTask = labels.some(l => strongTaskSignals.includes(l));
-                const isGenerateIdeas = labels.includes('generate_ideas');
-                const multipleIntents = (labels.length || 0) >= 2;
+**User Message:** "${userPrompt}"
 
-                if (multi?.primary === 'TASK' || hasStrongTask || (multipleIntents && (hasStrongTask || isGenerateIdeas))) {
-                    return 'TASK\nReason: Multi-intent classification indicates actionable steps';
-                }
-                if (multi?.primary === 'TOOL') {
-                    return 'TOOL\nReason: Multi-intent classification favors direct tool use';
-                }
-                // Otherwise fall through to legacy classifier (DIRECT or ambiguous)
-            }
-        } catch (e) {
-            console.warn('[ChatService] classifyMulti failed, falling back to single intent:', e);
-        }
+---
+**Classification Categories & Rules:**
 
-        return await IntentClassifier.classify({
-            llmFacade: facade,
-            userPrompt,
-            conversationContext,
-            history
-        });
+1.  **DIRECT**: The user wants the AI to analyze, explain, review, or answer something. The primary action is AI thought, which may require using tools to gather information first.
+    *   **Examples**: "review file.js", "explain this code", "what does this function do?", "how does this work?", "fix this error"
+    *   **Keywords**: review, explain, what, how, why, fix, analyze
+
+2.  **TOOL**: The user wants to directly execute a specific tool and see the raw output. The primary action is running a tool, not AI analysis.
+    *   **Examples**: "read file.js", "list all files in src/", "search for 'API_KEY'", "get_project_structure"
+    *   **Keywords**: read, list, search, get, run tool
+
+3.  **TASK**: The user wants to perform a complex, multi-step operation that requires planning and execution of several actions.
+    *   **Examples**: "create a login system", "refactor the database module", "implement user authentication", "build a new component"
+    *   **Keywords**: create, build, implement, refactor, design, develop, system, feature
+
+---
+**Your Response:**
+
+Provide the classification and a brief reason.
+
+Response format: DIRECT|TASK|TOOL
+Reason: [brief explanation]`;
+
+        // Use sendPrompt for a direct, non-chatty response
+        return await this.sendPrompt(classificationPrompt, { history: this.currentHistory });
     },
 
     /**
@@ -875,18 +656,106 @@ export const ChatService = {
 
     /**
      * Handles complex tasks that require breakdown and the full task management system.
-     * Delegates to TaskOrchestrator to coordinate execution.
+     * This function encapsulates the original, complex logic of `sendMessage`.
      * @param {string} userPrompt - The user's message.
      * @param {HTMLElement} chatMessages - The chat messages container.
      */
     async _handleTaskCreation(userPrompt, chatMessages) {
-        await TaskOrchestrator.run({ chatService: this, userPrompt, chatMessages });
+        // This is the original, complex logic, now conditionally executed.
+        await taskManager.clearActiveTasks();
+        UI.appendMessage(chatMessages, `Task created: "${userPrompt}"`, 'ai');
+        const mainTask = await taskManager.createTask({ title: userPrompt, priority: 'high' });
+
+        this.currentHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
+        this.currentHistory.push({ role: 'user', parts: [{ text: `The main task ID is ${mainTask.id}. Your first step is to call the "task_breakdown" tool with this ID.` }] });
+
+        await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: true }); // Force breakdown
+
+        let nextTask = taskManager.getNextTask();
+        let executionAttempts = 0;
+        const maxExecutionAttempts = 10;
+
+        while (nextTask && !this.isCancelled && executionAttempts < maxExecutionAttempts) {
+            executionAttempts++;
+            UI.appendMessage(chatMessages, `Executing subtask ${executionAttempts}: "${nextTask.title}"`, 'ai');
+            await taskManager.updateTask(nextTask.id, { status: 'in_progress' });
+
+            const contextInfo = this._buildTaskContext(nextTask);
+            const prompt = `Current subtask: "${nextTask.title}"${nextTask.description ? ` - ${nextTask.description}` : ''}.
+Context: ${contextInfo}
+Execute this task step by step. When completed, call the task_update tool to mark it as completed. Task ID: ${nextTask.id}`;
+            
+            this.currentHistory.push({ role: 'user', parts: [{ text: prompt }] });
+
+            let executionResult = null;
+            try {
+                const startTime = Date.now();
+                await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: false });
+                const endTime = Date.now();
+                const updatedTask = taskManager.tasks.get(nextTask.id);
+                if (updatedTask && updatedTask.status === 'in_progress') {
+                    await taskManager.updateTask(nextTask.id, {
+                        status: 'completed',
+                        results: { completedAutomatically: true, timestamp: Date.now(), executionTime: endTime - startTime }
+                    });
+                    executionResult = { success: true, executionTime: endTime - startTime };
+                } else {
+                    executionResult = { success: updatedTask?.status === 'completed', status: updatedTask?.status, results: updatedTask?.results };
+                }
+            } catch (error) {
+                console.error(`[ChatService] Error executing task ${nextTask.id}:`, error);
+                const errorAnalysis = this._analyzeTaskError(nextTask, error);
+                executionResult = { error: error.message, timestamp: Date.now(), analysis: errorAnalysis };
+                if (errorAnalysis.canRecover && errorAnalysis.retryCount < 2) {
+                    UI.appendMessage(chatMessages, `Task "${nextTask.title}" encountered an error. Attempting recovery...`, 'ai');
+                    await taskManager.updateTask(nextTask.id, {
+                        status: 'pending',
+                        context: { ...nextTask.context, errorHistory: [...(nextTask.context?.errorHistory || []), { error: error.message, timestamp: Date.now(), retryCount: errorAnalysis.retryCount + 1 }] }
+                    });
+                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
+                } else {
+                    await taskManager.updateTask(nextTask.id, { status: 'failed', results: executionResult });
+                    UI.appendMessage(chatMessages, `Task "${nextTask.title}" failed after recovery attempts: ${error.message}`, 'ai');
+                    await taskManager.replanBasedOnResults(nextTask.id, executionResult);
+                }
+            }
+
+            if (executionResult && !executionResult.error) {
+                await taskManager.replanBasedOnResults(nextTask.id, executionResult);
+            }
+
+            nextTask = taskManager.getNextTask();
+            if (nextTask && nextTask.status === 'failed' && executionAttempts > 3) {
+                console.warn(`[ChatService] Breaking execution loop - repeated failed task: ${nextTask.title}`);
+                break;
+            }
+        }
+
+        if (executionAttempts >= maxExecutionAttempts) {
+            UI.appendMessage(chatMessages, 'Execution stopped: Maximum attempts reached.', 'ai');
+        }
+
+        if (this.isCancelled) {
+            UI.appendMessage(chatMessages, 'Execution cancelled by user.', 'ai');
+            await taskManager.updateTask(mainTask.id, { status: 'failed', results: { cancelled: true, timestamp: Date.now() } });
+        } else {
+            const allSubtasks = mainTask.subtasks.map(id => taskManager.tasks.get(id)).filter(Boolean);
+            const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
+            const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
+            if (failedSubtasks.length > 0) {
+                await taskManager.updateTask(mainTask.id, { status: 'failed', results: { completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
+                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" partially completed. ${completedSubtasks.length}/${allSubtasks.length} subtasks successful.`, 'ai');
+            } else {
+                await taskManager.updateTask(mainTask.id, { status: 'completed', results: { completedSubtasks: completedSubtasks.length, timestamp: Date.now() } });
+                UI.appendMessage(chatMessages, `Main task "${mainTask.title}" completed successfully! All ${completedSubtasks.length} subtasks finished.`, 'ai');
+            }
+        }
+        await DbManager.saveChatHistory(this.currentHistory);
     },
 
     cancelMessage() {
         if (this.isSending) {
             this.isCancelled = true;
-            try { this.currentAbortController?.abort(); } catch (_) {}
         }
     },
 
@@ -933,14 +802,8 @@ export const ChatService = {
             "Please summarize our conversation so far in a concise way. Include all critical decisions, file modifications, and key insights. The goal is to reduce the context size while retaining the essential information for our ongoing task. Start the summary with 'Here is a summary of our conversation so far:'.";
         
         // This needs to be a one-off call, not part of the main loop
-        const condensationHistory = [...history, { role: 'user', parts: [{ text: condensationPrompt }] }];
-        const stream = this.llmFacade
-            ? this.llmFacade.sendMessageStream(condensationHistory, [], 'code', '')
-            : this.llmService.sendMessageStream(
-                [{ role: 'system', parts: [{ text: PromptBuilder.build('code', '').systemPrompt }] }, ...history, { role: 'user', parts: [{ text: condensationPrompt }] }],
-                [],
-                ''
-              );
+        const condensationHistory = history.concat([{ role: 'user', parts: [{ text: condensationPrompt }] }]);
+        const stream = this.llmService.sendMessageStream(condensationHistory, [], ''); // No tools, no custom rules for summary
         let summaryText = '';
         for await (const chunk of stream) {
             if (chunk.text) {
@@ -1178,36 +1041,4 @@ export const ChatService = {
        
        return insights;
    }
-,
-    
-    /**
-     * Expose provider debug info for UI panel
-     * Returns lightweight metrics and key rotation state without sensitive values.
-     */
-    getLLMDebugInfo() {
-        try {
-            const health = this.llmService?.getHealthStatus ? this.llmService.getHealthStatus() : null;
-            const apiKeyIndex = this.llmService?.apiKeyManager?.currentIndex ?? null;
-            const triedAllKeys = this.llmService?.apiKeyManager?.hasTriedAllKeys ? this.llmService.apiKeyManager.hasTriedAllKeys() : null;
-            const currentKeyMasked = (() => {
-                const mgr = this.llmService?.apiKeyManager;
-                if (!mgr || !mgr.getCurrentKey) return null;
-                const key = mgr.getCurrentKey();
-                if (!key) return null;
-                return key.length <= 8 ? '********' : `${key.slice(0, 4)}...${key.slice(-2)}`;
-            })();
-            return {
-                provider: this.currentProvider || health?.provider || (this.llmService?.constructor?.name || '').replace('Service', '').toLowerCase(),
-                model: this.llmService?.model ?? health?.model ?? null,
-                apiKeyIndex,
-                triedAllKeys,
-                currentKeyMasked,
-                isHealthy: health?.isHealthy ?? null,
-                metrics: health || null,
-                lastRequestMetrics: this.lastRequestMetrics || null
-            };
-        } catch (e) {
-            return { error: e?.message || String(e) };
-        }
-    }
 };

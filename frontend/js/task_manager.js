@@ -192,13 +192,8 @@ class TaskManager {
             actualTime: null,
             tags: data.tags || [],
             notes: [],
-            // Standardize results structure to enable artifact passing between subtasks
-            results: { artifacts: [], summary: null },
-            // Provide a sharedArtifacts array in context to accumulate cross-task resources
-            context: {
-                ...(data.context || {}),
-                sharedArtifacts: (data.context?.sharedArtifacts || [])
-            }
+            results: {}, // To store outcomes
+            context: data.context || {} // To store original query and other context
         };
 
         this.tasks.set(taskId, task);
@@ -300,31 +295,12 @@ class TaskManager {
             mainTask.notes.push(breakdownNote);
             
             const totalEstimatedTime = subtasks.reduce((sum, t) => sum + (t.estimatedTime || 30), 0);
-            const planOutline = subtasks.map(st => ({
-                id: st.id,
-                title: st.title,
-                priority: st.priority,
-                estimatedTime: st.estimatedTime
-            }));
-            const planOutlineHash = this._computePlanOutlineHash(planOutline);
-
-            // Goal Memory payload (long-term anchors to prevent drift)
-            const originalGoal = {
-                title: mainTask.title,
-                description: (mainTask.description || '')
-            };
-            const planOutlineText = planOutline.map(i => `- [${i.id}] (${i.priority}) ${i.title} ~${i.estimatedTime}m`).join('\n');
-
+            
             await this.updateTask(mainTask.id, {
                 status: 'in_progress',
                 estimatedTime: totalEstimatedTime,
                 context: {
                     ...mainTask.context,
-                    goalMemoryVersion: 1,
-                    originalGoal,
-                    planOutline,
-                    planOutlineText,
-                    planOutlineHash,
                     breakdown: {
                         method: 'ai-driven',
                         subtaskCount: subtasks.length,
@@ -347,37 +323,131 @@ class TaskManager {
      * AI-driven task breakdown using LLM intelligence
      */
     async _aiDrivenTaskBreakdown(mainTask) {
-        // Use external TaskPlanner to generate plan (LLM-based)
-        const { TaskPlanner } = await import('./task_planner.js');
-        const planner = new TaskPlanner();
+        // Import ChatService dynamically to avoid circular dependency
+        const { ChatService } = await import('./chat_service.js');
+        // ChatService is exported as an object, not a class, so use it directly
+        
+        const prompt = `You are an expert project manager. Break down this task into specific, actionable subtasks.
+
+TASK: "${mainTask.title}"
+DESCRIPTION: "${mainTask.description || 'No additional description provided'}"
+
+REQUIREMENTS:
+1. Create 3-6 specific, actionable subtasks
+2. Each subtask should be concrete and executable
+3. Avoid generic tasks like "analyze requirements" or "plan approach"
+4. Focus on specific actions like "locate CSS files", "update color variables", "test changes"
+5. Estimate time in minutes for each subtask
+6. Set appropriate priority (low, medium, high, urgent)
+
+Return ONLY a valid JSON array of subtasks in this exact format - no markdown, no code blocks, no explanations:
+[
+  {
+    "title": "Specific actionable task title",
+    "description": "Detailed description of what to do",
+    "priority": "high",
+    "estimatedTime": 20
+  }
+]
+
+CRITICAL: Your response must start with [ and end with ]. Do not include any text before or after the JSON array.`;
 
         try {
-            const aiSubtasks = await planner.generatePlan(mainTask);
-
-            // Safety enforcement and grounding: post-process planner output
-            const plannedWithSafety = this._enforceSafetyForPlan(mainTask, aiSubtasks);
-
+            // Send prompt without tools to avoid confusion
+            const response = await ChatService.sendPrompt(prompt, {
+                tools: [], // No tools needed for JSON response
+                history: ChatService.currentHistory || [] // Use live history
+            });
+            
+            // Extract JSON from response with more robust parsing
+            let jsonArray = null;
+            
+            // Try multiple approaches to extract JSON
+            // 1. Look for JSON array in response
+            let jsonMatch = response.match(/\[[\s\S]*?\]/);
+            if (jsonMatch) {
+                try {
+                    jsonArray = JSON.parse(jsonMatch[0]);
+                } catch (e) {
+                    console.warn('[TaskManager] Failed to parse first JSON match:', e.message);
+                }
+            }
+            
+            // 2. If first approach fails, try to find JSON between code blocks
+            if (!jsonArray) {
+                const codeBlockMatch = response.match(/```(?:json)?\n?([\s\S]*?)\n?```/);
+                if (codeBlockMatch) {
+                    try {
+                        jsonArray = JSON.parse(codeBlockMatch[1]);
+                    } catch (e) {
+                        console.warn('[TaskManager] Failed to parse code block JSON:', e.message);
+                    }
+                }
+            }
+            
+            // 3. If still no JSON, try to extract from the full response
+            if (!jsonArray) {
+                try {
+                    // Look for lines that start with [ and end with ]
+                    const lines = response.split('\n');
+                    const jsonLines = [];
+                    let inArray = false;
+                    let braceCount = 0;
+                    
+                    for (const line of lines) {
+                        if (line.trim().startsWith('[')) {
+                            inArray = true;
+                            braceCount = 0;
+                        }
+                        
+                        if (inArray) {
+                            jsonLines.push(line);
+                            braceCount += (line.match(/\[/g) || []).length;
+                            braceCount -= (line.match(/\]/g) || []).length;
+                            
+                            if (braceCount === 0 && line.trim().endsWith(']')) {
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (jsonLines.length > 0) {
+                        jsonArray = JSON.parse(jsonLines.join('\n'));
+                    }
+                } catch (e) {
+                    console.warn('[TaskManager] Failed to parse line-by-line JSON:', e.message);
+                }
+            }
+            
+            if (!jsonArray) {
+                console.error('[TaskManager] AI response:', response);
+                throw new Error('No valid JSON array found in AI response');
+            }
+            
+            const aiSubtasks = jsonArray;
+            
             // Validate and create actual subtasks
             const subtasks = [];
-
-            // Ensure array validity after safety pass
-            if (!Array.isArray(plannedWithSafety)) {
-                console.error('[TaskManager] Planner (after safety) response is not an array:', plannedWithSafety);
-                throw new Error('Planner response must be a JSON array of tasks');
+            let prevTaskId = null;
+            
+            // Ensure aiSubtasks is actually an array
+            if (!Array.isArray(aiSubtasks)) {
+                console.error('[TaskManager] AI response is not an array:', aiSubtasks);
+                throw new Error('AI response must be a JSON array of tasks');
             }
-
-            if (plannedWithSafety.length === 0) {
-                console.warn('[TaskManager] Planner (after safety) returned empty task array');
-                throw new Error('Planner returned no subtasks');
+            
+            if (aiSubtasks.length === 0) {
+                console.warn('[TaskManager] AI returned empty task array');
+                throw new Error('AI returned no subtasks');
             }
-
-            for (const [index, aiSubtask] of plannedWithSafety.entries()) {
+            
+            for (const [index, aiSubtask] of aiSubtasks.entries()) {
                 // Validate required fields
                 if (!aiSubtask.title) {
                     console.error(`[TaskManager] Subtask ${index} missing title:`, aiSubtask);
                     continue; // Skip invalid tasks
                 }
-
+                
                 try {
                     const subtask = await this.createTask({
                         title: aiSubtask.title,
@@ -385,148 +455,27 @@ class TaskManager {
                         priority: aiSubtask.priority || 'medium',
                         parentId: mainTask.id,
                         listId: mainTask.listId,
-                        dependencies: [],
+                        dependencies: prevTaskId ? [prevTaskId] : [],
                         estimatedTime: aiSubtask.estimatedTime || 30,
-                        tags: Array.isArray(aiSubtask.tags) ? ['ai-generated', 'subtask', 'ai-driven', ...aiSubtask.tags] : ['ai-generated', 'subtask', 'ai-driven'],
+                        tags: ['ai-generated', 'subtask', 'ai-driven'],
                         context: {
                             ...mainTask.context,
                             method: 'ai-driven',
-                            aiGenerated: true,
-                            // Pass through safety metadata for executor awareness
-                            safety: aiSubtask.safety || null,
-                            verification: aiSubtask.verification || null
+                            aiGenerated: true
                         }
                     });
                     subtasks.push(subtask);
+                    prevTaskId = subtask.id;
                 } catch (taskError) {
                     console.error(`[TaskManager] Failed to create subtask ${index}:`, taskError);
                     // Continue with other tasks even if one fails
                 }
             }
-
-            // Map dependency indices (from post-processed planner) to actual task IDs and update each subtask
-            try {
-                for (let i = 0; i < plannedWithSafety.length; i++) {
-                    const planned = plannedWithSafety[i];
-                    const created = subtasks[i];
-                    if (!created) continue;
-
-                    const depIdxs = Array.isArray(planned.dependencies) ? planned.dependencies : [];
-                    if (depIdxs.length === 0) continue;
-
-                    const depIds = depIdxs
-                        .map(idx => (idx >= 0 && idx < subtasks.length) ? subtasks[idx]?.id : null)
-                        .filter(Boolean);
-
-                    if (depIds.length > 0) {
-                        await this.updateTask(created.id, { dependencies: depIds });
-                        // add a small note for traceability
-                        created.notes = created.notes || [];
-                        created.notes.push({
-                            id: `note_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                            content: `Dependencies set from safety-enforced plan indices: [${depIdxs.join(', ')}]`,
-                            type: 'system',
-                            timestamp: Date.now()
-                        });
-                    }
-                }
-            } catch (depErr) {
-                console.warn('[TaskManager] Failed to apply planner dependencies (after safety):', depErr);
-            }
-
+            
             return subtasks;
         } catch (error) {
-            console.error('[TaskManager] Planner failed:', error);
+            console.error('[TaskManager] AI breakdown parsing failed:', error);
             throw error;
-        }
-    }
-
-    /**
-     * Enforce safety, confirmation, and grounded verification around destructive actions.
-     * - Inserts pre- and post- verification steps for delete/remove/drop/destroy actions
-     * - Ensures dependency ordering: confirm -> backup+verify -> destructive_action -> verify_result
-     * - Tags verification steps with 'verification' and hints for deterministic tools (no LLM hallucination)
-     */
-    _enforceSafetyForPlan(mainTask, aiSubtasks) {
-        try {
-            if (!Array.isArray(aiSubtasks) || aiSubtasks.length === 0) return aiSubtasks;
-
-            const isDestructiveTitle = (t) => {
-                const s = String(t || '').toLowerCase();
-                return /(delete|remove|destroy|drop|purge|wipe)/.test(s) && /(file|folder|directory|repo|workspace|project)/.test(s);
-            };
-
-            // Build a new list with safety steps inserted
-            const result = [];
-            for (let i = 0; i < aiSubtasks.length; i++) {
-                const item = aiSubtasks[i] || {};
-                const title = String(item.title || '').trim();
-
-                if (!isDestructiveTitle(title)) {
-                    // Non-destructive, just push through
-                    result.push({
-                        ...item,
-                        dependencies: Array.isArray(item.dependencies) ? item.dependencies.slice() : []
-                    });
-                    continue;
-                }
-
-                // Construct safety steps
-                const confirmStep = {
-                    title: '用户确认：允许执行高风险删除操作',
-                    description: '使用 ask_user_confirmation 工具向用户展示将要执行的删除范围与影响，用户显式确认后继续。若未确认，终止流程并标记任务失败。',
-                    priority: 'urgent',
-                    estimatedTime: 1,
-                    dependencies: Array.isArray(item.dependencies) ? item.dependencies.slice() : [],
-                    tags: ['safety', 'confirmation', 'gate'],
-                    safety: { kind: 'confirmation', required: true }
-                };
-
-                const backupStep = {
-                    title: '创建备份并进行校验',
-                    description: '使用 get_project_structure 列出全部文件后，创建备份（建议 tar/zip 或 workspace 复制）。随后再次列出并对比，确保备份完整。将备份位置记录到任务上下文。',
-                    priority: 'high',
-                    estimatedTime: 3,
-                    dependencies: [], // will depend on confirmStep when indices are finalized
-                    tags: ['safety', 'backup', 'verification', 'deterministic'],
-                    safety: { kind: 'backup', required: true },
-                    verification: { toolHint: 'get_project_structure', grounded: true }
-                };
-
-                const destructiveStep = {
-                    ...item,
-                    // Preserve original, but mark as destructive
-                    tags: Array.isArray(item.tags) ? [...item.tags, 'destructive'] : ['destructive']
-                };
-
-                const verifyAfterStep = {
-                    title: '删除结果校验（基于真实文件系统）',
-                    description: '调用 get_project_structure，确认所有目标文件/文件夹已不存在；工作区状态与预期一致。严禁调用 LLM 生成性验证。',
-                    priority: 'high',
-                    estimatedTime: 2,
-                    dependencies: [],
-                    tags: ['verification', 'deterministic', 'post-check'],
-                    verification: { toolHint: 'get_project_structure', grounded: true }
-                };
-
-                // Push steps and wire dependencies via indices
-                const baseIndex = result.length;
-                result.push(confirmStep);              // idx = baseIndex + 0
-                result.push(backupStep);               // idx = baseIndex + 1
-                result.push(destructiveStep);          // idx = baseIndex + 2
-                result.push(verifyAfterStep);          // idx = baseIndex + 3
-
-                // Set dependencies by indices (topological for later mapping)
-                result[baseIndex + 1].dependencies = [baseIndex + 0];             // backup depends on confirm
-                result[baseIndex + 2].dependencies = [baseIndex + 1];             // destructive depends on backup
-                result[baseIndex + 3].dependencies = [baseIndex + 2];             // verify-after depends on destructive
-            }
-
-            // If no destructive items were found, result may be empty; return original then
-            return result.length > 0 ? result : aiSubtasks;
-        } catch (e) {
-            console.warn('[TaskManager] Safety enforcement failed, falling back to original plan:', e);
-            return aiSubtasks;
         }
     }
 
@@ -535,31 +484,23 @@ class TaskManager {
      */
     async _fallbackTaskBreakdown(mainTask) {
         console.log('[TaskManager] Using fallback breakdown method');
-
+        
         const contextClues = this._analyzeTaskContext(mainTask);
-
-        // Domain-specific fallback (e.g., Tailwind + JS modules + ideas) before generic steps
-        let steps = this._createDomainSpecificFallbackSteps(mainTask);
-        if (!steps || steps.length === 0) {
-            steps = this._createContextualGenericSteps(mainTask, contextClues);
-        }
-
+        const genericSteps = this._createContextualGenericSteps(mainTask, contextClues);
+        
         const subtasks = [];
         let prevTaskId = null;
-
-        for (const step of steps) {
-            const baseTags = ['ai-generated', 'subtask', 'fallback'];
-            const tags = Array.isArray(step.tags) ? [...baseTags, ...step.tags] : baseTags;
-
+        
+        for (const step of genericSteps) {
             const subtask = await this.createTask({
                 title: step.title,
                 description: step.description || '',
                 priority: step.priority || 'medium',
                 parentId: mainTask.id,
                 listId: mainTask.listId,
-                dependencies: [],
+                dependencies: prevTaskId ? [prevTaskId] : [],
                 estimatedTime: step.estimatedTime || 30,
-                tags,
+                tags: ['ai-generated', 'subtask', 'fallback'],
                 context: {
                     ...mainTask.context,
                     method: 'fallback',
@@ -568,9 +509,9 @@ class TaskManager {
                 }
             });
             subtasks.push(subtask);
-            
+            prevTaskId = subtask.id;
         }
-
+        
         return subtasks;
     }
 
@@ -640,69 +581,6 @@ class TaskManager {
                 { title: 'Verify completion', priority: 'medium', description: 'Ensure the task was completed successfully', estimatedTime: 10 }
             ];
         }
-    }
-
-    /**
-     * Domain-specific fallback for common multi-intent prompts like:
-     * "use tailwindcss, several .js, list 10 ideas to improve this project"
-     */
-    _createDomainSpecificFallbackSteps(task) {
-        const text = `${task.title} ${task.description || ''}`.toLowerCase();
-        const wantsTailwind =
-            text.includes('tailwind');
-        const wantsJsModules =
-            text.includes('several .js') ||
-            text.includes('multiple js') ||
-            text.includes('create js') ||
-            text.includes('scaffold') ||
-            text.includes('modules');
-        const wantsIdeas =
-            text.includes('idea') ||
-            text.includes('improve') ||
-            text.includes('suggestion') ||
-            text.includes('ideas');
-
-        if (!(wantsTailwind || wantsJsModules || wantsIdeas)) {
-            return null;
-        }
-
-        const steps = [];
-
-        if (wantsTailwind) {
-            steps.push({
-                title: 'Inject Tailwind via CDN in frontend/index.html',
-                description: 'Use read_file with include_line_numbers=true on frontend/index.html, then apply_diff to insert <script src="https://cdn.tailwindcss.com"></script> before </head>. Add a small utility usage (e.g., <div class="p-2 text-sm">Tailwind OK</div>) to verify.',
-                priority: 'high',
-                estimatedTime: 10
-            });
-        }
-
-        if (wantsJsModules) {
-            steps.push({
-                title: 'Create JS modules under frontend/js/modules',
-                description: 'Use create_file to create: frontend/js/modules/dom_utils.js, frontend/js/modules/api_client.js, frontend/js/modules/state_store.js. Each should export at least one function with placeholder implementation and JSDoc.',
-                priority: 'high',
-                estimatedTime: 15
-            });
-            steps.push({
-                title: 'Link JS modules in index.html',
-                description: 'Use read_file with include_line_numbers=true on frontend/index.html, then apply_diff to add <script type="module" src="js/modules/dom_utils.js"></script>, <script type="module" src="js/modules/api_client.js"></script>, and <script type="module" src="js/modules/state_store.js"></script> before </body>.',
-                priority: 'medium',
-                estimatedTime: 10
-            });
-        }
-
-        if (wantsIdeas) {
-            steps.push({
-                title: 'Produce 10 concrete improvement ideas for this project',
-                description: 'Advisory output: actionable enhancements across reliability, UX, performance, and developer experience.',
-                priority: 'medium',
-                estimatedTime: 10,
-                tags: ['advisory']
-            });
-        }
-
-        return steps;
     }
 
     /**
@@ -1072,26 +950,6 @@ class TaskManager {
     }
     
     /**
-     * Hash plan outline to a compact fingerprint for drift detection and prompt references
-     */
-    _computePlanOutlineHash(planOutline) {
-        try {
-            const src = JSON.stringify(planOutline.map(i => ({ t: i.title, p: i.priority, e: i.estimatedTime })));
-            return this._hashString(src);
-        } catch (e) {
-            return String(Date.now());
-        }
-    }
-
-    _hashString(str) {
-        let hash = 5381;
-        for (let i = 0; i < str.length; i++) {
-            hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
-        }
-        return (hash >>> 0).toString(36);
-    }
-
-    /**
      * Storage operations
      */
     async saveToStorage() {
@@ -1427,311 +1285,6 @@ class TaskManager {
 }
 
 // Create global instance
-/**
- * Build PromptBuilder-compatible context slots for a given task or task id.
- * Returns an object suitable to pass as 'promptContext' to LLMFacade/PromptBuilder.
- *   {
- *     slots: {
- *       task_summary,
- *       plan_outline,
- *       plan_outline_hash,
- *       current_focus,
- *       tools_context,
- *       code_context
- *     },
- *     caps?: { ... } // optional caps passthrough
- *   }
- */
-TaskManager.prototype.buildPromptContext = function (taskOrId, options = {}) {
-    const task = typeof taskOrId === 'string' ? this.tasks.get(taskOrId) : taskOrId;
-    const slots = {};
-    if (!task) {
-        console.warn('[TaskManager] buildPromptContext: no task found for', taskOrId);
-        return { slots };
-    }
-
-    // Task Summary: always anchor on the original goal if present; otherwise the task itself
-    const og = task.context?.originalGoal;
-    const summaryTitle = og?.title || task.title || '';
-    const summaryDesc = (og?.description || task.description || '').trim();
-    slots.task_summary = [summaryTitle, summaryDesc ? `\n${summaryDesc}` : ''].join('');
-
-    // Plan Outline with statuses for all subtasks of the parent/main task if any
-    const parent = task.parentId ? this.tasks.get(task.parentId) : task;
-    if (parent) {
-        const outline = (parent.subtasks || [])
-            .map(id => this.tasks.get(id))
-            .filter(Boolean)
-            .map(t => {
-                const status = t.status || 'pending';
-                const mark = status === 'completed' ? 'x' : status === 'in_progress' ? '-' : ' ';
-                return `- [${mark}] (${t.priority || 'medium'}) ${t.title} {${t.id}}`;
-            })
-            .join('\n');
-        slots.plan_outline = outline;
-        slots.plan_outline_hash = parent.context?.planOutlineHash || null;
-    }
-
-    // Current focus: active task if present, else the provided task
-    const focusTask = (this.activeTask && this.tasks.get(this.activeTask)) || task;
-    slots.current_focus = `${focusTask.title} {${focusTask.id}}`;
-
-    // --- Cross-task artifact discovery (lightweight, no persistence mutation) ---
-    // Extract artifacts from:
-    // 1) parent.context.sharedArtifacts
-    // 2) sibling tasks' results.artifacts
-    // 3) notes heuristics (filenames, URLs, "saved as <name>")
-    const collectArtifacts = () => {
-        const artifacts = [];
-        const pushUnique = (art) => {
-            const key = `${art.kind}:${art.name || art.url}`;
-            if (!art.name && !art.url) return;
-            if (!artifacts.some(a => `${a.kind}:${a.name || a.url}` === key)) {
-                artifacts.push(art);
-            }
-        };
-
-        const extractFromNotes = (t) => {
-            const list = [];
-            const notes = Array.isArray(t?.notes) ? t.notes : [];
-            const urlRegex = /(https?:\/\/[^\s"')\]]+)/g;
-            const savedAsRegex = /saved\s+as\s+["'“”]?([A-Za-z0-9._\-\/]+)["'“”]?/i;
-
-            for (const n of notes) {
-                const text = String(n.content || '');
-                // URLs
-                let m;
-                while ((m = urlRegex.exec(text)) !== null) {
-                    list.push({ kind: 'url', url: m[1], sourceTaskId: t.id });
-                }
-                // "saved as ..."
-                const s = text.match(savedAsRegex);
-                if (s && s[1]) {
-                    list.push({ kind: 'named_resource', name: s[1], sourceTaskId: t.id });
-                }
-            }
-            return list;
-        };
-
-        // 1) Parent sharedArtifacts
-        const shared = Array.isArray(parent?.context?.sharedArtifacts) ? parent.context.sharedArtifacts : [];
-        shared.forEach(a => pushUnique({ ...a, kind: a.kind || (a.url ? 'url' : 'file'), sourceTaskId: a.sourceTaskId || parent?.id }));
-
-        // 2) Sibling artifacts
-        const siblings = (parent?.subtasks || [])
-            .map(id => this.tasks.get(id))
-            .filter(Boolean);
-        siblings.forEach(sib => {
-            const resArts = Array.isArray(sib?.results?.artifacts) ? sib.results.artifacts : [];
-            resArts.forEach(a => pushUnique({ ...a, sourceTaskId: a.sourceTaskId || sib.id }));
-            extractFromNotes(sib).forEach(a => pushUnique(a));
-        });
-
-        // 3) Current task notes (if any)
-        extractFromNotes(task).forEach(a => pushUnique(a));
-
-        return artifacts;
-    };
-
-    const artifacts = collectArtifacts();
-    if (artifacts.length > 0) {
-        const lines = artifacts.map(a => {
-            if (a.kind === 'url' && a.url) {
-                return `- URL: ${a.url} (from {${a.sourceTaskId || 'unknown'}})`;
-            }
-            if ((a.kind === 'file' || a.kind === 'named_resource') && a.name) {
-                return `- File/Resource: ${a.name} (from {${a.sourceTaskId || 'unknown'}})`;
-            }
-            if (a.name) {
-                return `- Resource: ${a.name} (from {${a.sourceTaskId || 'unknown'}})`;
-            }
-            return null;
-        }).filter(Boolean);
-        if (lines.length > 0) {
-            slots.available_artifacts = lines.join('\n');
-        }
-    }
-
-    // Add execution guidance to steer the model to reuse artifacts instead of re-doing work
-    const guidance = [];
-    guidance.push('- Reuse listed artifacts; do NOT redo broad web research if artifacts already exist.');
-    guidance.push("- If drafting a report and a dataset like 'research_raw' exists, read it with read_file(filename='research_raw') and synthesize.");
-    guidance.push("- Follow tool parameter schemas exactly (e.g., use filename, not path).");
-    guidance.push('- Prefer targeted tools (read_file_lines, search_in_file) over repeating prior stages.');
-    slots.execution_guidance = guidance.join('\n');
-
-    // Optional passthroughs for tools/code contexts from options
-    if (options.tools_context) slots.tools_context = String(options.tools_context);
-    if (options.code_context) slots.code_context = String(options.code_context);
-
-    // Minimal debug logging to verify slot composition
-    try {
-        const previewOutline = (slots.plan_outline || '').split('\n').slice(0, 3).join('\n');
-        console.log('[TaskManager.buildPromptContext] slots:', {
-            taskId: task.id,
-            hasTaskSummary: !!slots.task_summary,
-            outlineLines: (slots.plan_outline || '').split('\n').filter(Boolean).length,
-            planOutlineHash: slots.plan_outline_hash || null,
-            currentFocus: slots.current_focus || null,
-            artifactsCount: (slots.available_artifacts || '').split('\n').filter(Boolean).length,
-            outlinePreview: previewOutline
-        });
-    } catch (_) {}
-
-    const result = { slots };
-    if (options.caps) result.caps = options.caps;
-    return result;
-};
-
-/**
- * Persist a tool/LLM step's outputs into a task's results and shared context,
- * enabling subsequent subtasks to reuse artifacts (files, URLs, named resources) and summaries.
- * payload shape:
- *   {
- *     toolName?: string,
- *     args?: object,
- *     summary?: string,
- *     artifacts?: Array<{ kind?: 'url'|'file'|'named_resource'|'blob', url?: string, name?: string, title?: string }>,
- *     rawResult?: any
- *   }
- */
-TaskManager.prototype.recordToolResult = async function(taskIdOrActive, payload = {}) {
-    try {
-        const taskId = taskIdOrActive && taskIdOrActive !== 'active'
-            ? taskIdOrActive
-            : (this.activeTask || null);
-
-        if (!taskId) {
-            console.warn('[TaskManager.recordToolResult] No active task to attach results to.');
-            return { saved: false, reason: 'no_active_task' };
-        }
-
-        const task = this.tasks.get(taskId);
-        if (!task) {
-            console.warn('[TaskManager.recordToolResult] Task not found:', taskId);
-            return { saved: false, reason: 'task_not_found' };
-        }
-
-        // Ensure results and context structures
-        if (!task.results || typeof task.results !== 'object') {
-            task.results = { artifacts: [], summary: null };
-        }
-        if (!Array.isArray(task.results.artifacts)) {
-            task.results.artifacts = [];
-        }
-        if (!task.context || typeof task.context !== 'object') {
-            task.context = {};
-        }
-        if (!Array.isArray(task.context.sharedArtifacts)) {
-            task.context.sharedArtifacts = [];
-        }
-
-        const sourceTaskId = task.id;
-
-        // Normalize artifacts
-        const incomingArtifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
-        const normalizedArtifacts = incomingArtifacts
-            .map(a => this._normalizeArtifact(a, sourceTaskId))
-            .filter(Boolean);
-
-        // If caller only passed rawResult but it obviously contains a single file or URL,
-        // attempt to auto-normalize into an artifact to avoid losing useful context.
-        if (normalizedArtifacts.length === 0 && payload.rawResult && typeof payload.rawResult === 'object') {
-            const r = payload.rawResult;
-            if (typeof r.filename === 'string') {
-                normalizedArtifacts.push(this._normalizeArtifact({ kind: 'file', name: r.filename }, sourceTaskId));
-            } else if (typeof r.url === 'string') {
-                normalizedArtifacts.push(this._normalizeArtifact({ kind: 'url', url: r.url }, sourceTaskId));
-            } else if (typeof r.name === 'string') {
-                normalizedArtifacts.push(this._normalizeArtifact({ kind: 'named_resource', name: r.name }, sourceTaskId));
-            }
-        }
-
-        // Merge artifacts into task.results.artifacts (dedup)
-        const mergedArtifacts = this._dedupeArtifacts([...(task.results.artifacts || []), ...normalizedArtifacts]);
-        task.results.artifacts = mergedArtifacts;
-
-        // Also merge a simplified copy into sharedArtifacts so siblings can discover them
-        const sharedCopies = normalizedArtifacts.map(a => ({
-            kind: a.kind,
-            url: a.url,
-            name: a.name,
-            title: a.title,
-            sourceTaskId
-        }));
-        task.context.sharedArtifacts = this._dedupeArtifacts([...(task.context.sharedArtifacts || []), ...sharedCopies]);
-
-        // Update summary if provided (prefer explicit payload.summary; otherwise infer common fields)
-        const inferredSummary =
-            payload.summary ||
-            (typeof payload.rawResult?.summary === 'string' ? payload.rawResult.summary : null) ||
-            (typeof payload.rawResult?.content === 'string' ? payload.rawResult.content.slice(0, 2000) : null);
-
-        if (inferredSummary && (!task.results.summary || String(inferredSummary).length > String(task.results.summary).length)) {
-            task.results.summary = String(inferredSummary);
-        }
-
-        // Optionally store a light trace for provenance
-        const traceNote = {
-            id: `note_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            content: `[artifact-recorded] ${payload.toolName ? `tool=${payload.toolName}` : ''}${payload.summary ? ' • summary_updated' : ''}${normalizedArtifacts.length ? ` • artifacts=${normalizedArtifacts.length}` : ''}`,
-            type: 'system',
-            timestamp: Date.now()
-        };
-        task.notes = Array.isArray(task.notes) ? task.notes : [];
-        task.notes.push(traceNote);
-
-        await this.saveToStorage();
-        this.notifyListeners('task_updated', task);
-
-        return { saved: true, artifactsAdded: normalizedArtifacts.length, summaryUpdated: !!inferredSummary };
-    } catch (e) {
-        console.warn('[TaskManager.recordToolResult] Failed:', e);
-        return { saved: false, reason: 'exception', error: e.message };
-    }
-};
-
-/**
- * Normalize a raw artifact-like object to a consistent shape.
- */
-TaskManager.prototype._normalizeArtifact = function(a, sourceTaskId) {
-    try {
-        if (!a || typeof a !== 'object') return null;
-        const kind = a.kind || (a.url ? 'url' : (a.name ? 'file' : 'named_resource'));
-        const out = {
-            kind,
-            url: typeof a.url === 'string' ? a.url : undefined,
-            name: typeof a.name === 'string' ? a.name : undefined,
-            title: typeof a.title === 'string' ? a.title : undefined,
-            sourceTaskId
-        };
-        if (!out.url && !out.name) return null;
-        return out;
-    } catch (_) {
-        return null;
-    }
-};
-
-/**
- * Deduplicate artifacts by (kind, url|name) key.
- */
-TaskManager.prototype._dedupeArtifacts = function(list) {
-    try {
-        const seen = new Set();
-        const out = [];
-        for (const a of (Array.isArray(list) ? list : [])) {
-            const key = `${a.kind}:${a.url || a.name || ''}`;
-            if (!seen.has(key)) {
-                seen.add(key);
-                out.push(a);
-            }
-        }
-        return out;
-    } catch (_) {
-        return Array.isArray(list) ? list : [];
-    }
-};
-
 export const taskManager = new TaskManager();
 
 // Export convenience methods for tool integration
@@ -1743,7 +1296,6 @@ export const TaskTools = {
     getNext: () => taskManager.getNextTask(),
     getById: (id) => taskManager.tasks.get(id),
     getAll: (listId) => taskManager.getAllTasks(listId),
-    buildPromptContext: (taskId, options = {}) => taskManager.buildPromptContext(taskId, options),
     replan: async (newTasks) => {
         for (const taskData of newTasks) {
             await taskManager.createTask(taskData);

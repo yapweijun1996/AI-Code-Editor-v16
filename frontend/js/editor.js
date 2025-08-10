@@ -254,54 +254,6 @@ function getLanguageFromExtension(ext) {
 
 function renderTabs(tabBarContainer, onTabClick, onTabClose) {
     tabBarContainer.innerHTML = '';
-
-    // Ensure a reusable context menu exists
-    let menu = document.getElementById('tab-context-menu');
-    if (!menu) {
-        menu = document.createElement('div');
-        menu.id = 'tab-context-menu';
-        menu.style.position = 'fixed';
-        menu.style.display = 'none';
-        menu.style.zIndex = '9999';
-        menu.style.background = 'var(--panel-bg, #2b2b2b)';
-        menu.style.border = '1px solid #444';
-        menu.style.minWidth = '180px';
-        menu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.4)';
-        menu.innerHTML = `
-            <div class="ctx-item" data-cmd="close">Close</div>
-            <div class="ctx-item" data-cmd="closeOthers">Close Others</div>
-            <div class="ctx-item" data-cmd="closeAllButThis">Close All But This</div>
-            <div class="ctx-item" data-cmd="closeAll">Close All</div>
-        `;
-        menu.querySelectorAll('.ctx-item').forEach(el => {
-            el.style.padding = '8px 12px';
-            el.style.cursor = 'pointer';
-            el.addEventListener('mouseenter', () => el.style.background = 'rgba(255,255,255,0.06)');
-            el.addEventListener('mouseleave', () => el.style.background = 'transparent');
-        });
-        document.body.appendChild(menu);
-
-        document.addEventListener('click', () => {
-            menu.style.display = 'none';
-        });
-
-        menu.addEventListener('click', (e) => {
-            const cmd = e.target?.dataset?.cmd;
-            const ctxPath = menu.dataset.path;
-            if (!cmd || !ctxPath) return;
-            menu.style.display = 'none';
-            if (cmd === 'close') {
-                onTabClose(ctxPath);
-            } else if (cmd === 'closeOthers') {
-                closeOtherTabs(ctxPath, tabBarContainer);
-            } else if (cmd === 'closeAllButThis') {
-                closeAllButThis(ctxPath, tabBarContainer);
-            } else if (cmd === 'closeAll') {
-                closeAllTabs(tabBarContainer);
-            }
-        });
-    }
-
     openFiles.forEach((fileData, filePath) => {
         const tab = document.createElement('div');
         tab.className = 'tab' + (filePath === activeFilePath ? ' active' : '');
@@ -314,15 +266,6 @@ function renderTabs(tabBarContainer, onTabClick, onTabClose) {
         closeBtn.onclick = (e) => {
             e.stopPropagation();
             onTabClose(filePath);
-        };
-
-        tab.oncontextmenu = (e) => {
-            e.preventDefault();
-            // Position and show the context menu for this tab
-            menu.dataset.path = filePath;
-            menu.style.left = `${e.clientX}px`;
-            menu.style.top = `${e.clientY}px`;
-            menu.style.display = 'block';
         };
 
         tab.appendChild(closeBtn);
@@ -353,18 +296,6 @@ export function clearEditor() {
 
 export function initializeEditor(editorContainer, tabBarContainer, appState) {
     return new Promise((resolve) => {
-        // Configure Monaco workers for CDN usage to enable diagnostics
-        window.MonacoEnvironment = {
-            getWorkerUrl: function (moduleId, label) {
-                const base = MONACO_CDN_PATH;
-                if (label === 'json') return `${base}/language/json/json.worker.js`;
-                if (label === 'css' || label === 'scss' || label === 'less') return `${base}/language/css/css.worker.js`;
-                if (label === 'html' || label === 'handlebars' || label === 'razor') return `${base}/language/html/html.worker.js`;
-                if (label === 'typescript' || label === 'javascript') return `${base}/language/typescript/ts.worker.js`;
-                return `${base}/editor/editor.worker.js`;
-            }
-        };
-
         require.config({ paths: { 'vs': MONACO_CDN_PATH } });
         require(['vs/editor/editor.main'], () => {
             monaco.editor.defineTheme('cfmlTheme', {
@@ -390,25 +321,6 @@ export function initializeEditor(editorContainer, tabBarContainer, appState) {
                 },
             });
             monaco.editor.setTheme('cfmlTheme');
-
-            // Ensure JS/TS diagnostics are enabled (workers must be reachable)
-            try {
-                monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
-                monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-                    noSemanticValidation: false,
-                    noSyntaxValidation: false,
-                    noSuggestionDiagnostics: false
-                });
-                monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
-                monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
-                    noSemanticValidation: false,
-                    noSyntaxValidation: false,
-                    noSuggestionDiagnostics: false
-                });
-            } catch (e) {
-                console.warn('[Editor] Failed to configure Monaco diagnostics:', e);
-            }
-
             editor = monaco.editor.create(editorContainer, {
                 value: `<!-- Click "Open Project Folder" to start -->`,
                 language: 'html',
@@ -575,18 +487,6 @@ IMPORTANT: After successfully applying the improvements using the 'replace_selec
                 },
                 resolveCodeLens: function(model, codeLens, token) {
                     return codeLens;
-                }
-            });
-
-            // Listen for file-tree refreshes to reconcile editor state with filesystem
-            document.addEventListener('file-tree-refreshed', async (e) => {
-                try {
-                    const rootHandle = e.detail?.rootDirectoryHandle || appState?.rootDirectoryHandle;
-                    if (rootHandle) {
-                        await reconcileOpenTabs(rootHandle, { maxReloadBytes: 1024 * 1024 });
-                    }
-                } catch (err) {
-                    console.warn('[Editor] reconcileOpenTabs on refresh failed:', err);
                 }
             });
 
@@ -859,81 +759,6 @@ export function closeTab(filePath, tabBarContainer) {
         const onTabClick = (fp) => switchTab(fp, tabBarContainer);
         const onTabClose = (fp) => closeTab(fp, tabBarContainer);
         renderTabs(tabBarContainer, onTabClick, onTabClose);
-    }
-}
-
-/**
- * Close all tabs
- */
-export function closeAllTabs(tabBarContainer = document.getElementById('tab-bar')) {
-    const paths = Array.from(openFiles.keys());
-    for (const p of paths) {
-        closeTab(p, tabBarContainer);
-    }
-}
-
-/**
- * Close all tabs except the specified one
- */
-export function closeOtherTabs(currentPath, tabBarContainer = document.getElementById('tab-bar')) {
-    const paths = Array.from(openFiles.keys()).filter(p => p !== currentPath);
-    for (const p of paths) {
-        closeTab(p, tabBarContainer);
-    }
-}
-
-/**
- * Close all tabs but the current one
- */
-export function closeAllButThis(currentPath, tabBarContainer = document.getElementById('tab-bar')) {
-    closeOtherTabs(currentPath, tabBarContainer);
-}
-
-/**
- * Reconcile open Monaco models/tabs against the filesystem after refresh or AI edits
- * - Closes tabs for deleted files
- * - Reloads content for small changed files (<= maxReloadBytes)
- */
-export async function reconcileOpenTabs(rootHandle, options = {}) {
-    const MAX_RELOAD_BYTES = options.maxReloadBytes ?? 1024 * 1024; // 1MB default
-    const deleted = [];
-
-    for (const [path, data] of openFiles.entries()) {
-        let handle;
-        try {
-            handle = await getFileHandleFromPath(rootHandle, path);
-        } catch (_) {
-            // File no longer exists
-            deleted.push(path);
-            continue;
-        }
-
-        try {
-            const file = await handle.getFile();
-            // Update handle reference
-            data.handle = handle;
-
-            if (file.size <= MAX_RELOAD_BYTES) {
-                const text = await file.text();
-                if (data.model && data.model.getValue() !== text) {
-                    data.model.setValue(text);
-                }
-            } else {
-                // For large files, avoid heavy reloads automatically
-                // Optionally show a gentle hint/toast
-                // UI.showToast(`File changed on disk (large): ${data.name}`, 'info', 2500);
-            }
-        } catch (e) {
-            console.warn('[Editor] Reconcile failed for', path, e);
-        }
-    }
-
-    if (deleted.length) {
-        const tabBarContainer = document.getElementById('tab-bar');
-        deleted.forEach(p => closeTab(p, tabBarContainer));
-        try {
-            UI.showToast(`Closed ${deleted.length} tab(s) for deleted files`, 'info', 4000);
-        } catch (_) {}
     }
 }
 

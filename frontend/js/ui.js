@@ -25,14 +25,7 @@ export function relayout(editor) {
 }
 
 export function renderTree(treeData, onFileSelect, appState) {
-    const el = $('#file-tree');
-
-    // Prevent duplicate event handlers after rebuilds
-    try {
-        el.off('select_node.jstree rename_node.jstree');
-    } catch (_) {}
-
-    el
+    $('#file-tree')
         .on('select_node.jstree', (e, data) => {
             if (data.node.type === 'file') {
                 onFileSelect(data.node.id);
@@ -120,15 +113,6 @@ export async function refreshFileTree(rootDirectoryHandle, onFileSelect, appStat
         renderTree(treeData, onFileSelect, appState);
 
         updateDirectoryButtons(true);
-
-        try {
-            // Notify listeners (e.g., Editor) to reconcile open tabs/models with FS
-            document.dispatchEvent(new CustomEvent('file-tree-refreshed', {
-                detail: { rootDirectoryHandle, onFileSelect }
-            }));
-        } catch (e) {
-            console.warn('[UI] Failed to dispatch file-tree-refreshed event:', e);
-        }
     }
 }
 

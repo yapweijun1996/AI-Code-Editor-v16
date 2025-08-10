@@ -9,31 +9,6 @@ export const Settings = {
         'llm.openai.model': 'gpt-4o',
         'llm.ollama.model': 'llama3',
         'llm.ollama.baseURL': 'http://localhost:11434',
-
-        'llm.common.debugLLM': false,
-        'llm.common.timeoutMs': 300000,
-        'llm.common.retryAttempts': 3,
-        'llm.common.retryDelay': 1000,
-        'llm.common.requestsPerMinute': 60,
-        'llm.common.tokensPerMinute': 1000000,
-
-        // Provider-specific tuning
-        'llm.gemini.temperature': 0.4,
-        'llm.gemini.topP': 1,
-        'llm.gemini.maxOutputTokens': 8192,
-        'llm.gemini.enableTools': true,
-
-        'llm.openai.temperature': 0.2,
-        'llm.openai.topP': 1,
-        'llm.openai.maxTokens': 4096,
-        'llm.openai.toolCallMode': 'auto', // 'auto' | 'none' | 'required'
-        'llm.openai.enableTools': true,
-
-        'llm.ollama.temperature': 0.2,
-        'llm.ollama.topP': 0.9,
-        'llm.ollama.maxTokens': 1024,
-        'llm.ollama.enableTools': false,
-
         'ui.theme': 'dark',
         'custom.amend.rules': `You are in "Amend Mode" - optimized for fast, precise debugging and code changes.
 
@@ -116,12 +91,6 @@ export const Settings = {
         } else {
             console.log(`Setting "${key}" updated to "${value}".`);
         }
-        // Notify listeners if LLM settings changed so services can reconfigure at runtime
-        try {
-            if (typeof key === 'string' && key.startsWith('llm.')) {
-                document.dispatchEvent(new CustomEvent('llm-settings-updated'));
-            }
-        } catch (_) {}
     },
 
     async setMultiple(settings) {
@@ -138,13 +107,6 @@ export const Settings = {
             }
         }
         await DbManager.saveMultipleSettings(settingsToSave);
-        // Notify listeners if any LLM-related setting changed
-        try {
-            const touchedLLM = Object.keys(settings || {}).some(k => typeof k === 'string' && k.startsWith('llm.'));
-            if (touchedLLM) {
-                document.dispatchEvent(new CustomEvent('llm-settings-updated'));
-            }
-        } catch (_) {}
     },
 
     /**
@@ -153,43 +115,18 @@ export const Settings = {
      * @returns {object} An object containing all necessary LLM settings.
      */
     getLLMSettings() {
-        const common = {
-            debugLLM: !!this.get('llm.common.debugLLM'),
-            timeout: this.get('llm.common.timeoutMs'),
-            retryAttempts: this.get('llm.common.retryAttempts'),
-            retryDelay: this.get('llm.common.retryDelay'),
-            rateLimit: {
-                requestsPerMinute: this.get('llm.common.requestsPerMinute'),
-                tokensPerMinute: this.get('llm.common.tokensPerMinute'),
-            }
-        };
-
         return {
             provider: this.get('llm.provider'),
             apiKeyManager: ApiKeyManager, // Pass the singleton instance
-            common,
             gemini: {
                 model: this.get('llm.gemini.model'),
-                temperature: this.get('llm.gemini.temperature'),
-                topP: this.get('llm.gemini.topP'),
-                maxOutputTokens: this.get('llm.gemini.maxOutputTokens'),
-                enableTools: !!this.get('llm.gemini.enableTools'),
             },
             openai: {
                 model: this.get('llm.openai.model'),
-                temperature: this.get('llm.openai.temperature'),
-                topP: this.get('llm.openai.topP'),
-                maxTokens: this.get('llm.openai.maxTokens'),
-                toolCallMode: this.get('llm.openai.toolCallMode'),
-                enableTools: !!this.get('llm.openai.enableTools'),
             },
             ollama: {
                 model: this.get('llm.ollama.model'),
                 baseURL: this.get('llm.ollama.baseURL'),
-                temperature: this.get('llm.ollama.temperature'),
-                topP: this.get('llm.ollama.topP'),
-                maxTokens: this.get('llm.ollama.maxTokens'),
-                enableTools: !!this.get('llm.ollama.enableTools'),
             },
         };
     }
