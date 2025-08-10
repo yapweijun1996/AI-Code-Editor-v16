@@ -274,7 +274,13 @@ class TaskManager {
     async breakdownGoal(mainTask) {
         console.log(`[TaskManager] Breaking down goal: "${mainTask.title}"`);
         
+        // Single-use guard: if already broken down, return cached subtasks
         try {
+            if (mainTask.context?.hasBrokenDown) {
+                const cached = (mainTask.subtasks || []).map(id => this.tasks.get(id)).filter(Boolean);
+                console.warn(`[TaskManager] Skipping repeated breakdown for "${mainTask.title}" (hasBrokenDown=true). Returning ${cached.length} cached subtasks.`);
+                return cached;
+            }
             // Use AI to intelligently break down the task
             const subtasks = await this._aiDrivenTaskBreakdown(mainTask);
             
@@ -301,6 +307,7 @@ class TaskManager {
                 estimatedTime: totalEstimatedTime,
                 context: {
                     ...mainTask.context,
+                    hasBrokenDown: true,
                     breakdown: {
                         method: 'ai-driven',
                         subtaskCount: subtasks.length,
@@ -527,8 +534,49 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                                     ? Object.keys(aiSubtasks[0]).join(', ')
                                     : typeof aiSubtasks[0];
                                 console.warn('[TaskManager] Could not adapt provider JSON. First item keys/type:', keys);
-                                // Escalate to fallback breakdown at a higher level
-                                throw new Error('AI returned subtasks without titles and no adaptable schema (requested_actions/actions/steps/tasks/items).');
+
+                                // LENIENT FALLBACK ADAPTER:
+                                // As a last resort, coerce arbitrary entries into actionable subtasks instead of throwing.
+                                aiSubtasks = (Array.isArray(aiSubtasks) ? aiSubtasks : [aiSubtasks]).map((entry, i) => {
+                                    if (typeof entry === 'string') {
+                                        return {
+                                            title: entry.trim() || `Step ${i + 1}`,
+                                            description: 'Converted from provider string entry.',
+                                            priority: i === 0 ? 'high' : 'medium',
+                                            estimatedTime: 15
+                                        };
+                                    }
+                                    if (entry && typeof entry === 'object') {
+                                        // Try to derive a title from any readable text field
+                                        const textFields = ['title','description','details','reason','instruction','message','summary','note','text','content','info'];
+                                        let titleCandidate = null;
+                                        for (const k of textFields) {
+                                            if (entry[k] && String(entry[k]).trim().length > 0) {
+                                                titleCandidate = String(entry[k]).trim();
+                                                break;
+                                            }
+                                        }
+                                        // Build description: prefer description/details/reason/explanation; else truncated JSON
+                                        const jsonStr = (() => {
+                                            try { return JSON.stringify(entry); } catch { return String(entry); }
+                                        })();
+                                        const descCandidate = entry.description || entry.details || entry.reason || entry.explanation ||
+                                            `Converted from provider object: ${jsonStr.slice(0, 300)}${jsonStr.length > 300 ? '…' : ''}`;
+                                        return {
+                                            title: titleCandidate || `Step ${i + 1}`,
+                                            description: String(descCandidate),
+                                            priority: i === 0 ? 'high' : 'medium',
+                                            estimatedTime: 15
+                                        };
+                                    }
+                                    return {
+                                        title: `Step ${i + 1}`,
+                                        description: 'Converted from unknown provider entry.',
+                                        priority: i === 0 ? 'high' : 'medium',
+                                        estimatedTime: 15
+                                    };
+                                });
+                                console.warn('[TaskManager] Applied lenient fallback adaptation to provider JSON.');
                             }
                         }
             
@@ -565,7 +613,32 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                         continue; // Skip invalid tasks
                     }
                 }
-                
+
+                // Classification: advisory/meta detection and self-referential filtering
+                const titleLC = String(aiSubtask.title || '').toLowerCase();
+                const descLC = String(aiSubtask.description || aiSubtask.details || aiSubtask.explanation || aiSubtask.reason || '').toLowerCase();
+
+                const advisoryKeywords = [
+                    'plan', 'guide', 'proposal', 'explain', 'review', 'confirm scope', 'checklist',
+                    'safety', 'backup', 'confirmation', '说明', '方案', '计划', '建议', '确认'
+                ];
+                const metaKeywords = [
+                    'tool unavailable', 'tool disabled', 'cannot call tool', 'task_breakdown',
+                    'call_task_breakdown', 'destructive_action_requires_confirmation',
+                    'policy', 'rate limit', 'tools are unavailable', '工具不可用', '工具被禁用'
+                ];
+
+                const contains = (arr) => arr.some(k => titleLC.includes(k) || descLC.includes(k));
+                const isSelfReferential = /(task_breakdown|call_task_breakdown)/.test(titleLC) || /(task_breakdown|call_task_breakdown)/.test(descLC);
+                const isAdvisory = contains(advisoryKeywords);
+                const isMeta = contains(metaKeywords) || isSelfReferential;
+
+                // Determine initial status and tagging
+                const initialStatus = (isAdvisory || isMeta) ? 'completed' : 'pending';
+                const tags = ['ai-generated', 'subtask', 'ai-driven'];
+                if (isAdvisory) tags.push('advisory');
+                if (isMeta) tags.push('meta');
+
                 try {
                     const subtask = await this.createTask({
                         title: aiSubtask.title,
@@ -573,17 +646,27 @@ CRITICAL: Your response must start with [ and end with ]. Do not include any tex
                         priority: aiSubtask.priority || 'medium',
                         parentId: mainTask.id,
                         listId: mainTask.listId,
-                        dependencies: prevTaskId ? [prevTaskId] : [],
+                        // Only chain dependency if this is an actionable task
+                        dependencies: (initialStatus === 'pending' && prevTaskId) ? [prevTaskId] : [],
                         estimatedTime: (typeof aiSubtask.estimatedTime === 'number' && aiSubtask.estimatedTime > 0) ? aiSubtask.estimatedTime : 30,
-                        tags: ['ai-generated', 'subtask', 'ai-driven'],
+                        tags,
+                        status: initialStatus,
                         context: {
                             ...mainTask.context,
                             method: 'ai-driven',
                             aiGenerated: true
-                        }
+                        },
+                        results: (isAdvisory || isMeta) ? {
+                            type: isMeta ? 'meta' : 'advisory',
+                            autoCompleted: true,
+                            timestamp: Date.now()
+                        } : {}
                     });
                     subtasks.push(subtask);
-                    prevTaskId = subtask.id;
+                    // Only advance dependency chain for actionable tasks
+                    if (initialStatus !== 'completed') {
+                        prevTaskId = subtask.id;
+                    }
                 } catch (taskError) {
                     console.error(`[TaskManager] Failed to create subtask ${index}:`, taskError);
                     // Continue with other tasks even if one fails

@@ -246,6 +246,8 @@ export const ChatService = {
 
     async _performApiCall(history, chatMessages, options = {}) {
         const { singleTurn = false, useTools = true, directAnalysis = false } = options;
+        // Track whether tools are allowed this turn. Empty-turn retry will disable tools for the next iteration.
+        let currentUseTools = useTools;
 
         if (!this.llmService) {
             UI.showError("LLM Service is not initialized. Please check your settings.");
@@ -272,7 +274,7 @@ export const ChatService = {
                 const customRules = Settings.get(`custom.${mode}.rules`);
                 
                 // Enhanced tool definitions with smart recommendations
-                let tools = useTools ? ToolExecutor.getToolDefinitions() : [];
+                let tools = currentUseTools ? ToolExecutor.getToolDefinitions() : [];
                 
                 if (useTools) {
                     // Optimize tool selection for amend mode
@@ -331,8 +333,10 @@ export const ChatService = {
                 if (!modelResponseText && functionCalls.length === 0) {
                     if (emptyRetryCount < 1) {
                         emptyRetryCount++;
-                        console.warn('[ChatService] Empty model turn detected. Retrying once...');
-                        UI.appendMessage(chatMessages, 'No response received, retrying...', 'ai-muted');
+                        // Important: disable tools on the next iteration to avoid tool spam/recursive breakdown
+                        currentUseTools = false;
+                        console.warn('[ChatService] Empty model turn detected. Retrying once without tools...');
+                        UI.appendMessage(chatMessages, 'No response received, retrying without tools...', 'ai-muted');
                         continue;
                     } else {
                         console.warn('[ChatService] Empty model turn after retry. Exiting without marking completion.');
@@ -351,37 +355,67 @@ export const ChatService = {
                 }
 
                 if (functionCalls.length > 0) {
-                    // Normalize tool calls to prevent schema errors (e.g., missing 'updates' for task_update)
-                    const normalizedCalls = functionCalls.map((call) => {
-                        const name = call.name;
-                        const rawArgs = call.args || {};
-                        const args = { ...rawArgs };
+                    // Normalize tool calls to prevent schema errors and useless updates
+                    let normalizedCalls = functionCalls
+                        .map((call) => {
+                            const name = call.name;
+                            const rawArgs = call.args || {};
+                            const args = { ...rawArgs };
 
-                        // Common key normalization: snake_case -> camelCase
-                        if ('task_id' in args && !('taskId' in args)) args.taskId = args.task_id;
-                        if ('list_id' in args && !('listId' in args)) args.listId = args.list_id;
-                        if ('old_path' in args && !('old_path' in args)) args.old_path = args.old_path; // kept same
-                        if ('new_path' in args && !('new_path' in args)) args.new_path = args.new_path; // kept same
+                            // Common key normalization: snake_case -> camelCase
+                            if ('task_id' in args && !('taskId' in args)) args.taskId = args.task_id;
+                            if ('list_id' in args && !('listId' in args)) args.listId = args.list_id;
 
-                        // Specific normalization for task_update: ensure required shape
-                        if (name === 'task_update') {
-                            if (!args.taskId && typeof args.taskId !== 'string' && typeof args.task_id === 'string') {
-                                args.taskId = args.task_id;
+                            // Special case: get_file_info('.git') -> robust repo detection via structure
+                            if (name === 'get_file_info' && args.filename === '.git') {
+                                console.warn('[ChatService] Redirecting get_file_info(".git") to get_project_structure for repo detection.');
+                                return { ...call, name: 'get_project_structure', args: {} };
                             }
-                            if (!args.updates || typeof args.updates !== 'object') {
-                                // Synthesize a minimal updates object to satisfy tool contract
-                                // Prefer any top-level status if present; otherwise create empty update.
-                                const synthesized = {};
-                                if (typeof args.status === 'string') {
-                                    synthesized.status = args.status;
+
+                            // Single-use guard: ignore task_breakdown if the task already broke down once
+                            if (name === 'task_breakdown') {
+                                const tId = args.taskId || args.task_id;
+                                if (typeof tId === 'string') {
+                                    const t = taskManager.tasks.get(tId);
+                                    if (t?.context?.hasBrokenDown) {
+                                        console.warn(`[ChatService] Skipping redundant task_breakdown for taskId=${tId} (already broken down).`);
+                                        return null;
+                                    }
                                 }
-                                args.updates = synthesized;
-                                console.warn('[ChatService] Normalized task_update call: injected missing "updates" object.');
                             }
-                        }
 
-                        return { ...call, args };
-                    });
+                            // Specific normalization for task_update: ensure required shape, or skip empty updates
+                            if (name === 'task_update') {
+                                if (!args.taskId && typeof args.taskId !== 'string' && typeof args.task_id === 'string') {
+                                    args.taskId = args.task_id;
+                                }
+                                const hasUpdatesObject = args.updates && typeof args.updates === 'object';
+                                const topLevelStatus = typeof args.status === 'string' ? args.status : null;
+
+                                if (!hasUpdatesObject && topLevelStatus) {
+                                    args.updates = { status: topLevelStatus };
+                                    console.warn('[ChatService] Normalized task_update: promoted top-level status into updates.');
+                                } else if (!hasUpdatesObject) {
+                                    // Skip useless empty updates to avoid spam
+                                    console.warn('[ChatService] Skipping task_update with empty or missing updates.');
+                                    return null;
+                                } else if (Object.keys(args.updates).length === 0) {
+                                    console.warn('[ChatService] Skipping task_update with empty updates object.');
+                                    return null;
+                                }
+                            }
+
+                            return { ...call, args };
+                        })
+                        .filter(Boolean); // remove skipped calls
+
+                    // If current iteration forbids tools (e.g., empty-turn retry), ignore any function calls
+                    if (!currentUseTools) {
+                        if (normalizedCalls.length > 0) {
+                            console.warn('[ChatService] Tools are disabled for this iteration; ignoring emitted tool calls.');
+                        }
+                        normalizedCalls = [];
+                    }
 
                     // Execute all tools sequentially for all providers
                     const toolResults = [];
@@ -396,7 +430,10 @@ export const ChatService = {
                             response: result.toolResponse.response,
                         });
                     }
-                    history.push({ role: 'user', parts: toolResults.map(functionResponse => ({ functionResponse })) });
+
+                    if (toolResults.length > 0) {
+                        history.push({ role: 'user', parts: toolResults.map(functionResponse => ({ functionResponse })) });
+                    }
                     
                     if (singleTurn) {
                         continueLoop = false;
@@ -759,12 +796,27 @@ Execute this task step by step. When completed, call the task_update tool to mar
                 await this._performApiCall(this.currentHistory, chatMessages, { singleTurn: false });
                 const endTime = Date.now();
                 const updatedTask = taskManager.tasks.get(nextTask.id);
+
                 if (updatedTask && updatedTask.status === 'in_progress') {
-                    await taskManager.updateTask(nextTask.id, {
-                        status: 'completed',
-                        results: { completedAutomatically: true, timestamp: Date.now(), executionTime: endTime - startTime }
-                    });
-                    executionResult = { success: true, executionTime: endTime - startTime };
+                    const tags = updatedTask.tags || [];
+                    const isAdvisoryOrMeta = tags.includes('advisory') || tags.includes('meta');
+
+                    if (isAdvisoryOrMeta) {
+                        // Only advisory/meta subtasks can be auto-completed without tool execution
+                        await taskManager.updateTask(nextTask.id, {
+                            status: 'completed',
+                            results: { autoCompleted: true, type: tags.includes('meta') ? 'meta' : 'advisory', timestamp: Date.now(), executionTime: endTime - startTime }
+                        });
+                        executionResult = { success: true, autoCompleted: true, executionTime: endTime - startTime };
+                    } else {
+                        // Actionable task had no tools executed; mark as failed to avoid false completion
+                        await taskManager.updateTask(nextTask.id, {
+                            status: 'failed',
+                            results: { error: 'No tool execution detected; model returned text only', timestamp: Date.now(), executionTime: endTime - startTime }
+                        });
+                        UI.appendMessage(chatMessages, `Task "${nextTask.title}" failed: no tools executed (text-only response).`, 'ai');
+                        executionResult = { success: false, error: 'no_tools_executed', executionTime: endTime - startTime };
+                    }
                 } else {
                     executionResult = { success: updatedTask?.status === 'completed', status: updatedTask?.status, results: updatedTask?.results };
                 }
@@ -809,6 +861,7 @@ Execute this task step by step. When completed, call the task_update tool to mar
             const completedSubtasks = allSubtasks.filter(t => t.status === 'completed');
             const failedSubtasks = allSubtasks.filter(t => t.status === 'failed');
 
+            // Completion without explicit confirmation (no destructive gating)
             if (allSubtasks.length === 0 || completedSubtasks.length === 0) {
                 await taskManager.updateTask(mainTask.id, { status: 'failed', results: { reason: 'No substasks executed or completed', completedSubtasks: completedSubtasks.length, failedSubtasks: failedSubtasks.length, timestamp: Date.now() } });
                 UI.appendMessage(chatMessages, `Main task "${mainTask.title}" did not complete: ${completedSubtasks.length}/${allSubtasks.length} subtasks completed.`, 'ai');
